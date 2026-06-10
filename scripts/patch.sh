@@ -464,89 +464,122 @@ else
     warn "RenderAPIConfig.smali not found, skipping direct-to-view patch"
 fi
 
-# ─── Patch NRP blit mode to NATIVE_ANDROID_DIRECT_TO_VIEW ──────────────────
+# ─── Force 4K display detection (lifts the 1.5x resolution cap) ─────────────
 #
-# Tiledmedia's default blit mode (AUTO_DETECT) routes decoded frames through
-# GPU tile composition via SurfaceTexture → EGL → swapBuffers. On Amlogic
-# devices (Xiaomi TV Box S, etc.) this path drops ~13% of frames.
-# The SDK has a built-in NATIVE_ANDROID_DIRECT_TO_VIEW mode that bypasses
-# GPU composition and outputs the decoder directly to the SurfaceView.
-# Fix: on Amlogic devices, return NATIVE_ANDROID_DIRECT_TO_VIEW.
-#      on other devices (NVIDIA Shield, etc.), use the original value.
+# Tiledmedia caps streaming resolution at ~1.5x the display size it detects.
+# On NVIDIA Shield (and similar) the SDK reads the 1080p UI surface, so it caps
+# tiles at 2880x1620 instead of 3840x2160 — the "can only select up to
+# 2880x1620" symptom (issue #9). Force getDefaultDisplaySize() to report a
+# 3840x2160 panel so the cap allows full 2160p.
 
-info "Patching NRP blit mode to direct-to-view (Amlogic only)..."
-RENDER_CONFIG="$(find "${DECOMPILED}" -name 'RenderAPIConfig.smali' -path '*/tiledmedia/*' -print -quit 2>/dev/null || true)"
-
-if [[ -n "${RENDER_CONFIG}" && -f "${RENDER_CONFIG}" ]]; then
-    python3 - "${RENDER_CONFIG}" << 'PYEOF'
-import sys
+info "Searching for TrueTVDisplaySizeHelper.smali..."
+TRUE_TV_HELPER="$(find "${DECOMPILED}" -name 'TrueTVDisplaySizeHelper.smali' -path '*/tiledmedia/*' -print -quit)"
+if [[ -n "${TRUE_TV_HELPER}" ]]; then
+    ok "Found: ${TRUE_TV_HELPER#${WORKDIR}/}"
+    info "Forcing display size to 3840x2160..."
+    python3 - "${TRUE_TV_HELPER}" << 'PYEOF'
+import sys, re
 
 path = sys.argv[1]
 with open(path, 'r') as f:
     content = f.read()
 
-# Patch getNRPTextureBlitMode() to return NATIVE_ANDROID_DIRECT_TO_VIEW on Amlogic,
-# or the original configured value on other devices.
-# Original (.locals 1):
-#   iget-object v0, p0, ...->nrpTextureBlitMode
-#   return-object v0
-#
-# Patched (.locals 2):
-#   check Build.HARDWARE.contains("amlogic")
-#   if true -> return NATIVE_ANDROID_DIRECT_TO_VIEW
-#   else   -> return original nrpTextureBlitMode
+# Replace getDefaultDisplaySize() body with a hardcoded 3840x2160 Point.
+# 0xf00 = 3840, 0x870 = 2160. Result is also cached in trueDisplaySize.
+pattern = (
+    r'\.method private static getDefaultDisplaySize\(Landroid/content/Context;\)Landroid/graphics/Point;'
+    r'.*?'
+    r'\.end method'
+)
+replacement = """.method private static getDefaultDisplaySize(Landroid/content/Context;)Landroid/graphics/Point;
+    .locals 3
 
-old = """    iget-object v0, p0, Lcom/tiledmedia/clearvrview/RenderAPIConfig;->nrpTextureBlitMode:Lcom/tiledmedia/clearvrenums/NRPTextureBlitMode;
+    # UHD Patch: always report a 3840x2160 panel
+    new-instance v0, Landroid/graphics/Point;
 
-    return-object v0
-.end method
+    const/16 v1, 0xf00
 
-.method public getNrpColorSpace"""
+    const/16 v2, 0x870
 
-new = """    sget-object v0, Landroid/os/Build;->HARDWARE:Ljava/lang/String;
+    invoke-direct {v0, v1, v2}, Landroid/graphics/Point;-><init>(II)V
 
-    const-string v1, "amlogic"
-
-    invoke-virtual {v0, v1}, Ljava/lang/String;->contains(Ljava/lang/CharSequence;)Z
-
-    move-result v0
-
-    if-eqz v0, :use_default
-
-    sget-object v0, Lcom/tiledmedia/clearvrenums/NRPTextureBlitMode;->NATIVE_ANDROID_DIRECT_TO_VIEW:Lcom/tiledmedia/clearvrenums/NRPTextureBlitMode;
+    sput-object v0, Lcom/tiledmedia/clearvrview/TrueTVDisplaySizeHelper;->trueDisplaySize:Landroid/graphics/Point;
 
     return-object v0
+.end method"""
 
-    :use_default
-    iget-object v0, p0, Lcom/tiledmedia/clearvrview/RenderAPIConfig;->nrpTextureBlitMode:Lcom/tiledmedia/clearvrenums/NRPTextureBlitMode;
-
-    return-object v0
-.end method
-
-.method public getNrpColorSpace"""
-
-if old not in content:
-    print(f"Could not find getNRPTextureBlitMode pattern in {path}", file=sys.stderr)
+content, count = re.subn(pattern, replacement, content, flags=re.DOTALL)
+if count == 0:
+    print("ERROR: getDefaultDisplaySize not found", file=sys.stderr)
     sys.exit(1)
-
-content = content.replace(old, new, 1)
-
-# Also bump .locals 1 to .locals 2 in this method (need v1 for the "amlogic" string)
-method_header = '.method public getNRPTextureBlitMode()Lcom/tiledmedia/clearvrenums/NRPTextureBlitMode;\n    .locals 1'
-method_header_new = '.method public getNRPTextureBlitMode()Lcom/tiledmedia/clearvrenums/NRPTextureBlitMode;\n    .locals 2'
-if method_header in content:
-    content = content.replace(method_header, method_header_new, 1)
-else:
-    print(f"  Warning: could not bump .locals in getNRPTextureBlitMode", file=sys.stderr)
 
 with open(path, 'w') as f:
     f.write(content)
-print(f"  Patched {path}")
+print(f"Patched getDefaultDisplaySize -> 3840x2160")
 PYEOF
 
-    [[ $? -eq 0 ]] && ok "NRP direct-to-view patch applied (Amlogic only)" || warn "NRP direct-to-view patch failed"
+    [[ $? -eq 0 ]] || die "4K display patch failed"
+    ok "4K display detection patch applied"
 else
-    warn "RenderAPIConfig.smali not found, skipping direct-to-view patch"
+    warn "TrueTVDisplaySizeHelper.smali not found, skipping 4K display patch"
+fi
+
+# ─── HLG/HDR bypass (fallback — opt-in via F1TV_HLG_BYPASS=1) ───────────────
+#
+# F1TV only serves the 2160p tier inside the HDR (HLG) manifest; SDR is capped
+# at 1620p server-side. Devices that don't expose the EGL HLG colorspace
+# extension (e.g. NVIDIA Shield) never advertise HLG support, so the backend
+# withholds 2160p. Forcing getIsBt2020HlgExtensionSupported() to true makes the
+# SDK advertise HLG so the 2160p HDR tier is offered.
+#
+# This is a FALLBACK — only needed if the 4K display patch above isn't enough.
+# Enable with F1TV_HLG_BYPASS=1. HLG output may not render correctly on devices
+# without true HLG support, so test before relying on it.
+
+if [[ "${F1TV_HLG_BYPASS:-0}" == "1" ]]; then
+    info "F1TV_HLG_BYPASS=1 — patching HLG extension support..."
+    EGL_RENDER="$(find "${DECOMPILED}" -name 'EGLRenderTarget.smali' -path '*/tiledmedia/*' -print -quit)"
+    if [[ -n "${EGL_RENDER}" ]]; then
+        ok "Found: ${EGL_RENDER#${WORKDIR}/}"
+        python3 - "${EGL_RENDER}" << 'PYEOF'
+import sys, re
+
+path = sys.argv[1]
+with open(path, 'r') as f:
+    content = f.read()
+
+# Force getIsBt2020HlgExtensionSupported() to always return true.
+pattern = (
+    r'\.method public static getIsBt2020HlgExtensionSupported\(\)Z'
+    r'.*?'
+    r'\.end method'
+)
+replacement = """.method public static getIsBt2020HlgExtensionSupported()Z
+    .locals 1
+
+    # UHD Patch: always advertise HLG support
+    const/4 v0, 0x1
+
+    return v0
+.end method"""
+
+content, count = re.subn(pattern, replacement, content, flags=re.DOTALL)
+if count == 0:
+    print("ERROR: getIsBt2020HlgExtensionSupported not found", file=sys.stderr)
+    sys.exit(1)
+
+with open(path, 'w') as f:
+    f.write(content)
+print(f"Patched getIsBt2020HlgExtensionSupported -> true")
+PYEOF
+
+        [[ $? -eq 0 ]] || die "HLG bypass patch failed"
+        ok "HLG bypass patch applied"
+    else
+        warn "EGLRenderTarget.smali not found, skipping HLG bypass"
+    fi
+else
+    info "HLG bypass disabled (set F1TV_HLG_BYPASS=1 to enable as fallback)"
 fi
 
 # ─── Patch version name ─────────────────────────────────────────────────────
