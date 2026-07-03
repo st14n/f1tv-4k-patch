@@ -308,8 +308,9 @@ def download_apkm(release_url: str, variant_url: str | None, output_dir: str) ->
         except PwTimeout:
             log("  #download-link not found, waiting for auto-download...")
 
-        # Poll for download event
-        timeout_secs = 120
+        # Poll for download event. APKMirror's countdown + Cloudflare can eat well
+        # over a minute before the download actually starts, so keep this generous.
+        timeout_secs = 240
         poll_interval = 1
         elapsed = 0
         while download_event is None and elapsed < timeout_secs:

@@ -203,7 +203,7 @@ info "Searching for DiagnosticsPreferenceManagerImpl.smali..."
 DIAG_SMALI="$(find "${DECOMPILED}" -name 'DiagnosticsPreferenceManagerImpl.smali' -print -quit)"
 if [[ -n "${DIAG_SMALI}" ]]; then
     ok "Found: ${DIAG_SMALI#${WORKDIR}/}"
-    info "Patching diagnostics methods to always return true..."
+    info "Enabling the in-app quality selector..."
     python3 - "${DIAG_SMALI}" << 'PYEOF'
 import sys, re
 
@@ -211,13 +211,11 @@ smali_path = sys.argv[1]
 with open(smali_path, 'r') as f:
     content = f.read()
 
-# Methods to patch: all return boolean and should always return true
+# Only enable the quality selector. The stream-type / player-type / logs
+# overlays draw debug text on screen and are intentionally left off for a
+# clean release (set them back here if you need on-screen diagnostics).
 methods_to_enable = [
     "isVideoQualityEnabled",
-    "isScreenCaptureEnabled",
-    "isVideoStreamTypeOverlayEnabled",
-    "isPlayerTypeOverlayEnabled",
-    "isOverlayLogsEnabled",
 ]
 
 total = 0
@@ -420,11 +418,20 @@ fi
 # The SDK has a built-in NATIVE_ANDROID_DIRECT_TO_VIEW mode that bypasses
 # GPU composition and outputs the decoder directly to the SurfaceView.
 # Fix: always return NATIVE_ANDROID_DIRECT_TO_VIEW for all devices.
+#
+# NOTE: direct-to-view tags the output surface with the CONTENT's transfer (HLG
+# for F1 UHD). On a device whose panel accepts HDR10 (PQ) but not HLG, the
+# compositor can't switch to an HLG mode and falls back to SDR output (accurate
+# but not HDR). Set F1TV_DIRECT_TO_VIEW=0 to skip this patch and use the EGL
+# render path instead, where the PQ reroute (F1TV_PQ_REROUTE) can build a real
+# BT2100_PQ surface and drive HDR10 output.
 
-info "Patching NRP blit mode to direct-to-view (all devices)..."
 RENDER_CONFIG="$(find "${DECOMPILED}" -name 'RenderAPIConfig.smali' -path '*/tiledmedia/*' -print -quit 2>/dev/null || true)"
 
-if [[ -n "${RENDER_CONFIG}" && -f "${RENDER_CONFIG}" ]]; then
+if [[ "${F1TV_DIRECT_TO_VIEW:-1}" == "0" ]]; then
+    info "F1TV_DIRECT_TO_VIEW=0 — skipping direct-to-view (using EGL render path for HDR output)"
+elif [[ -n "${RENDER_CONFIG}" && -f "${RENDER_CONFIG}" ]]; then
+    info "Patching NRP blit mode to direct-to-view (all devices)..."
     python3 - "${RENDER_CONFIG}" << 'PYEOF'
 import sys
 
@@ -524,20 +531,25 @@ else
     warn "TrueTVDisplaySizeHelper.smali not found, skipping 4K display patch"
 fi
 
-# ─── HLG/HDR bypass (fallback — opt-in via F1TV_HLG_BYPASS=1) ───────────────
+# ─── HLG/HDR unlock (default ON — required for the 2160p tier) ──────────────
 #
-# F1TV only serves the 2160p tier inside the HDR (HLG) manifest; SDR is capped
-# at 1620p server-side. Devices that don't expose the EGL HLG colorspace
-# extension (e.g. NVIDIA Shield) never advertise HLG support, so the backend
-# withholds 2160p. Forcing getIsBt2020HlgExtensionSupported() to true makes the
-# SDK advertise HLG so the 2160p HDR tier is offered.
+# F1TV only serves the 2160p tier inside the HDR manifest; SDR is hard-capped at
+# 1620p server-side. ClearVR reports which HDR transfer functions it can render
+# to the F1TV backend via DeviceParameters -> addEglSupportedHDRTypes(PQ/HLG),
+# and that call is gated SOLELY on getIsBt2020HlgExtensionSupported(). The NVIDIA
+# Shield's EGL does not expose the BT2020 colorspace extension, so unpatched the
+# SDK reports "no EGL HDR" and the backend withholds EVERY 2160p tier (they are
+# all HDR). Forcing the check true makes ClearVR report PQ+HLG, so the 2160p HDR
+# tier is offered — this is REQUIRED for 4K, not a fallback.
 #
-# This is a FALLBACK — only needed if the 4K display patch above isn't enough.
-# Enable with F1TV_HLG_BYPASS=1. HLG output may not render correctly on devices
-# without true HLG support, so test before relying on it.
+# The direct-to-view blit patch above is what makes this safe: the decoder
+# outputs straight to the SurfaceView, so Android's display pipeline handles HLG
+# instead of the EGL colorspace path that would otherwise fail on the Shield. The
+# real display-capability probe (doesDisplaySupport) still runs, so SDR-only
+# panels fall back to SDR automatically. Set F1TV_HLG_BYPASS=0 to skip this patch.
 
-if [[ "${F1TV_HLG_BYPASS:-0}" == "1" ]]; then
-    info "F1TV_HLG_BYPASS=1 — patching HLG extension support..."
+if [[ "${F1TV_HLG_BYPASS:-1}" != "0" ]]; then
+    info "Patching HLG extension support (required for the 2160p HDR tier)..."
     EGL_RENDER="$(find "${DECOMPILED}" -name 'EGLRenderTarget.smali' -path '*/tiledmedia/*' -print -quit)"
     if [[ -n "${EGL_RENDER}" ]]; then
         ok "Found: ${EGL_RENDER#${WORKDIR}/}"
@@ -579,7 +591,120 @@ PYEOF
         warn "EGLRenderTarget.smali not found, skipping HLG bypass"
     fi
 else
-    info "HLG bypass disabled (set F1TV_HLG_BYPASS=1 to enable as fallback)"
+    warn "F1TV_HLG_BYPASS=0 — skipping HLG unlock; the 2160p tier will NOT be offered (SDR caps at 1620p)"
+fi
+
+# ─── EXPERIMENTAL: reroute HLG content to the PQ/HDR10 render path ──────────
+# (opt-in via F1TV_PQ_REROUTE=1)
+#
+# F1TV's 2160p is HLG. Some devices (notably the NVIDIA Shield) expose the EGL
+# BT2020 *PQ* colorspace (EGL_EXT_gl_colorspace_bt2020_pq) but NOT the *HLG* one,
+# and their panel accepts HDR10 (PQ) only. ClearVR tags F1 content requireHLG,
+# tries to create an HLG EGL surface (EGLRenderTarget surface-creation reads
+# RenderTargetConfig.requireHLG()/require2020PQ()), fails, and drops to SDR 1620p.
+#
+# This reroutes the render path: requireHLG() -> false, require2020PQ() -> (PQ||HLG),
+# so HLG content is rendered through the PQ colorspace the device DOES support.
+# SDR content (both flags false) is unaffected. The transfer curves differ, so
+# tone/brightness may be off — this is an experiment to see whether 2160p HDR10
+# can be coaxed out on HLG-incapable hardware. Requires F1TV_HLG_BYPASS on too.
+if [[ "${F1TV_PQ_REROUTE:-0}" == "1" ]]; then
+    info "F1TV_PQ_REROUTE=1 — rerouting HLG render path to PQ/HDR10..."
+    RTC_SMALI="$(find "${DECOMPILED}" -name 'RenderTargetConfig.smali' -path '*/tiledmedia/*' -print -quit)"
+    if [[ -n "${RTC_SMALI}" ]]; then
+        ok "Found: ${RTC_SMALI#${WORKDIR}/}"
+        python3 - "${RTC_SMALI}" << 'PYEOF'
+import sys, re
+
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+
+C = 'Lcom/tiledmedia/clearvrview/RenderTargetConfig;'
+
+# requireHLG() -> always false (device can't create an HLG EGL surface)
+hlg_new = f""".method public requireHLG()Z
+    .locals 1
+
+    const/4 v0, 0x0
+
+    return v0
+.end method"""
+content, n1 = re.subn(r'\.method public requireHLG\(\)Z.*?\.end method', hlg_new, content, flags=re.DOTALL)
+
+# require2020PQ() -> (_require2020PQ OR _requireHLG): route HLG content through PQ
+pq_new = f""".method public require2020PQ()Z
+    .locals 2
+
+    iget-boolean v0, p0, {C}->_require2020PQ:Z
+
+    iget-boolean v1, p0, {C}->_requireHLG:Z
+
+    or-int/2addr v0, v1
+
+    return v0
+.end method"""
+content, n2 = re.subn(r'\.method public require2020PQ\(\)Z.*?\.end method', pq_new, content, flags=re.DOTALL)
+
+if n1 != 1 or n2 != 1:
+    print(f"ERROR: PQ reroute pattern miss (requireHLG={n1}, require2020PQ={n2})", file=sys.stderr)
+    sys.exit(1)
+
+with open(path, 'w') as f:
+    f.write(content)
+print("PQ reroute applied (requireHLG->false, require2020PQ->PQ||HLG)")
+PYEOF
+        [[ $? -eq 0 ]] || die "PQ reroute patch failed"
+        ok "PQ reroute patch applied"
+    else
+        warn "RenderTargetConfig.smali not found, skipping PQ reroute"
+    fi
+fi
+
+# ─── Spoof display HDR capability (default ON — the 2160p unlock) ───────────
+#
+# This is what actually gets 2160p onto the NVIDIA Shield and other HDR10-only
+# panels. ClearVR's DeviceParameters.doesDisplaySupport() reads
+# Display.getHdrCapabilities().getSupportedHdrTypes() and reports it to the core.
+# The core only serves an HDR tier whose type is in BOTH the EGL-supported AND
+# the DISPLAY-supported sets. F1's 2160p is HLG (type 3); a panel that reports
+# only HDR10 (type 2) makes the core reject HLG upstream and fall back to the SDR
+# 1620p tile before any render target is created.
+#
+# Forcing doesDisplaySupport() -> true makes the core serve the 2160p (HLG) tiles.
+# The device's video pipeline then converts HLG to whatever the panel accepts
+# (HDR10, or a clean SDR downconvert), the same path YouTube HLG uses on an HDR10
+# TV. On genuinely HDR-capable devices this is a no-op. Set F1TV_DISPLAY_HDR_SPOOF=0
+# to disable and fall back to stock behaviour (SDR-capable devices cap at 1620p).
+if [[ "${F1TV_DISPLAY_HDR_SPOOF:-1}" != "0" ]]; then
+    info "Forcing display HDR-type support (unlocks the 2160p tier)..."
+    DEVPARAMS="$(find "${DECOMPILED}" -name 'DeviceParameters.smali' -path '*/tiledmedia/*' -print -quit)"
+    if [[ -n "${DEVPARAMS}" ]]; then
+        ok "Found: ${DEVPARAMS#${WORKDIR}/}"
+        python3 - "${DEVPARAMS}" << 'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+new = """.method private static doesDisplaySupport(Landroid/content/Context;I)Z
+    .locals 1
+
+    const/4 v0, 0x1
+
+    return v0
+.end method"""
+content, n = re.subn(r'\.method private static doesDisplaySupport\(Landroid/content/Context;I\)Z.*?\.end method', new, content, flags=re.DOTALL)
+if n != 1:
+    print(f"ERROR: doesDisplaySupport not found ({n})", file=sys.stderr); sys.exit(1)
+with open(path, 'w') as f:
+    f.write(content)
+print("doesDisplaySupport -> always true (display reports all HDR types)")
+PYEOF
+        [[ $? -eq 0 ]] || die "Display HDR spoof patch failed"
+        ok "Display HDR spoof patch applied"
+    else
+        warn "DeviceParameters.smali not found, skipping display HDR spoof"
+    fi
 fi
 
 # ─── Patch version name ─────────────────────────────────────────────────────
@@ -644,6 +769,19 @@ while IFS= read -r -d '' split; do
 done < <(find "${BUNDLE_DIR}" -maxdepth 1 -name '*.apk' -print0)
 
 info "Found ${#ALL_APKS[@]} APK(s) to process (base + ${#ALL_APKS[@]}-1 splits)"
+
+# ─── ABI sanity check (arm64 needed for reliable 4K on modern TVs) ──────────
+# The ClearVR native decoder/renderer ships per-ABI. On an arm64 device the app
+# runs whichever native split is installed; a bundle with only armeabi-v7a forces
+# ClearVR to run 32-bit, which commonly can't sustain 4K secure HEVC (TM4014 /
+# "acquireVdecResource not enough" errors). Warn loudly so v7a-only builds don't
+# masquerade as full 4K bundles.
+if ! printf '%s\n' "${ALL_APKS[@]}" | grep -q 'arm64_v8a'; then
+    warn "No arm64-v8a split in this bundle — ClearVR will run 32-bit on arm64 devices (NVIDIA Shield, etc.)."
+    warn "32-bit often can't sustain 4K secure HEVC. For full 4K, build from the Google Play (arm64) source."
+else
+    ok "arm64-v8a split present (native 64-bit ClearVR — required for reliable 4K)"
+fi
 
 # ─── Remove signatures from all splits ───────────────────────────────────────
 

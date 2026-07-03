@@ -413,6 +413,11 @@ jobs:
           chmod +x scripts/patch.sh
           bash scripts/patch.sh "${{ steps.apkm.outputs.path }}" output/
         env:
+          # The two flags that unlock the 2160p tier. Without them F1TV caps at
+          # 1620p on devices/panels that don't advertise HLG (NVIDIA Shield, etc.).
+          # Both default on in patch.sh; set explicitly here for clarity.
+          F1TV_HLG_BYPASS: "1"
+          F1TV_DISPLAY_HDR_SPOOF: "1"
           KEYSTORE_PATH: ${{ env.KEYSTORE_PATH || '' }}
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'android' }}
           KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS || 'f1tvpatch' }}

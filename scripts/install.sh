@@ -13,6 +13,7 @@ set -euo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
@@ -20,6 +21,7 @@ PACKAGE="com.formulaone.production"
 
 info()  { echo -e "${CYAN}[*]${NC} $*"; }
 ok()    { echo -e "${GREEN}[+]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 die()   { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 cleanup() {
@@ -99,6 +101,7 @@ INSTALL_FILES=("${BASE}")
 SPLIT_PREFIXES=("split_config" "config" "${PACKAGE}.config")
 
 # Find ABI split (try preferred ABI first, then compatible fallbacks)
+SELECTED_ABI=""
 for abi in "${ABI_KEYS[@]}"; do
     FOUND=false
     for prefix in "${SPLIT_PREFIXES[@]}"; do
@@ -106,12 +109,22 @@ for abi in "${ABI_KEYS[@]}"; do
         if [[ -f "${SPLIT}" ]]; then
             INSTALL_FILES+=("${SPLIT}")
             ok "Selected: $(basename "${SPLIT}")"
+            SELECTED_ABI="${abi}"
             FOUND=true
             break
         fi
     done
     ${FOUND} && break
 done
+
+# On a 64-bit device, falling back to the 32-bit split forces ClearVR to run in
+# 32-bit — which commonly can't sustain 4K secure HEVC. Warn so the user knows
+# their bundle is missing the arm64 split (build from the Google Play source).
+if [[ "${DEVICE_ABI}" == "arm64-v8a" && "${SELECTED_ABI}" == "armeabi_v7a" ]]; then
+    warn "This bundle has no arm64-v8a split — installing 32-bit libs on a 64-bit device."
+    warn "ClearVR will run 32-bit and 4K may fail (TM4014 / decoder resource errors)."
+    warn "For full 4K on this device, use a bundle built from the Google Play (arm64) source."
+fi
 
 # Find locale and DPI splits
 for key in "${LANG_CODE}" "xhdpi"; do
