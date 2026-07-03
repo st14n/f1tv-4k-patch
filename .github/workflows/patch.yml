@@ -34,11 +34,11 @@ jobs:
       version_short: ${{ steps.version.outputs.version_short }}
       should_build: ${{ steps.decide.outputs.should_build }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Restore apkeep cache
         id: apkeep-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: /usr/local/bin/apkeep
           key: apkeep-v2-${{ env.APKEEP_VERSION }}
@@ -75,7 +75,12 @@ jobs:
         id: existing
         if: steps.version.outputs.version_short != ''
         run: |
-          if gh release view "v${{ steps.version.outputs.version_short }}" &>/dev/null; then
+          TAG="v${{ steps.version.outputs.version_short }}"
+          # Dev branch uses a separate tag
+          if [[ "${{ github.ref_name }}" != "main" ]]; then
+            TAG="${TAG}-${{ github.ref_name }}"
+          fi
+          if gh release view "${TAG}" &>/dev/null; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -120,7 +125,7 @@ jobs:
 
       - name: Save apkeep cache
         if: always() && steps.apkeep-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: /usr/local/bin/apkeep
           key: apkeep-v2-${{ env.APKEEP_VERSION }}
@@ -131,9 +136,9 @@ jobs:
     if: needs.check.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -147,7 +152,7 @@ jobs:
 
       - name: Restore Playwright cache
         id: pw-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
           key: playwright-${{ steps.pw.outputs.version }}
@@ -162,7 +167,7 @@ jobs:
 
       - name: Restore apktool cache
         id: apktool-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: /usr/local/bin/apktool*
           key: apktool-${{ env.APKTOOL_VERSION }}
@@ -191,7 +196,7 @@ jobs:
       - name: Restore custom apkeep cache
         if: ${{ !inputs.apkm_url }}
         id: apkeep-custom-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: /usr/local/bin/apkeep
           key: apkeep-custom-${{ env.APKEEP_CUSTOM_TAG }}
@@ -357,7 +362,7 @@ jobs:
 
       - name: Upload download debug screenshots
         if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && steps.download_apkpure.outcome != 'success' && steps.download_auto.outcome != 'success' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: download-debug-screenshots
           path: download/debug_*
@@ -408,13 +413,23 @@ jobs:
           chmod +x scripts/patch.sh
           bash scripts/patch.sh "${{ steps.apkm.outputs.path }}" output/
         env:
+          # Unlock the 2160p tier and render it with correct colours. All default
+          # on/off in patch.sh; set explicitly here for clarity.
+          #   HLG_BYPASS + DISPLAY_HDR_SPOOF -> serve the 2160p (HLG) tier
+          #   DIRECT_TO_VIEW=0 + PQ_REROUTE  -> EGL/GL path with correct 4K colours
+          # For weak/Amlogic GPUs that drop frames on the GL path, set
+          # F1TV_DIRECT_TO_VIEW=1 (trades correct HDR colours for smoothness).
+          F1TV_HLG_BYPASS: "1"
+          F1TV_DISPLAY_HDR_SPOOF: "1"
+          F1TV_DIRECT_TO_VIEW: "0"
+          F1TV_PQ_REROUTE: "1"
           KEYSTORE_PATH: ${{ env.KEYSTORE_PATH || '' }}
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'android' }}
           KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS || 'f1tvpatch' }}
 
       # ── Upload artifacts (always, even if release creation fails) ──
       - name: Upload patched APKs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: f1tv-uhd-patched-${{ needs.check.outputs.version_short }}
           path: output/
@@ -426,6 +441,15 @@ jobs:
         run: |
           TAG="v${{ needs.check.outputs.version_short }}"
           TITLE="F1TV UHD Patched - ${{ needs.check.outputs.version }}"
+          PRERELEASE_FLAG=""
+
+          # Non-main branches get a separate pre-release
+          BRANCH="${{ github.ref_name }}"
+          if [[ "${BRANCH}" != "main" ]]; then
+            TAG="${TAG}-${BRANCH}"
+            TITLE="${TITLE} (${BRANCH})"
+            PRERELEASE_FLAG="--prerelease"
+          fi
 
           # Delete existing release if force-rebuilding
           if [[ "${{ inputs.force }}" == "true" ]]; then
@@ -448,10 +472,13 @@ jobs:
 
           gh release create "${TAG}" \
             --title "${TITLE}" \
+            --target "${BRANCH}" \
+            ${PRERELEASE_FLAG} \
             --notes "$(cat <<NOTES
           Patched F1TV Android TV app with UHD/4K enabled.
 
           **Version:** \`${{ needs.check.outputs.version }}\`
+          **Branch:** \`${BRANCH}\`
           **${SOURCE_NOTE}**
 
           ## Install
@@ -508,21 +535,21 @@ jobs:
       # ── Save caches (runs even if job fails) ──
       - name: Save Playwright cache
         if: always() && steps.pw-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
           key: playwright-${{ steps.pw.outputs.version }}
 
       - name: Save apktool cache
         if: always() && steps.apktool-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: /usr/local/bin/apktool*
           key: apktool-${{ env.APKTOOL_VERSION }}
 
       - name: Save custom apkeep cache
         if: always() && steps.apkeep-custom-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: /usr/local/bin/apkeep
           key: apkeep-custom-${{ env.APKEEP_CUSTOM_TAG }}

@@ -6,10 +6,24 @@ Automated pipeline that patches the F1TV Android TV app to enable UHD/4K playbac
 
 1. **Checks** APKPure every 3 hours for new F1TV Android TV releases
 2. **Downloads** the app bundle — Google Play primary (arm64 native via NVIDIA Shield profile), APKPure and APKMirror as fallbacks
-3. **Patches** the `validateIsUhdSupportedDevice` smali method to always return `true`
+3. **Patches** the smali to unlock 4K on any device (UHD/device whitelist bypass, the 1.5× display-size cap, the HDR-capability gate that unlocks the 2160p tier, and decoder/render tweaks — see [Applied patches](#applied-patches))
 4. **Signs** all APKs with a consistent keystore
 5. **Publishes** the patched bundle as a GitHub Release
 6. **Notifies** via Pushover when a new patch is ready (or if it fails)
+
+> **How 4K gets unlocked (and why stock skips the Shield).** F1TV picks a stream manifest from
+> the `x-f1-device-info` header. The Android app sends `device=android_tv`, which returns the
+> Widevine `HDR-UHD-CMAF-WV` manifest where **2160p exists only as HDR; SDR is hard-capped at
+> 1620p server-side**. ClearVR only requests the 2160p tier if the content's HDR type is in
+> *both* what the EGL renderer supports *and* what the display reports
+> (`Display.getHdrCapabilities()`). F1's UHD is **HLG**; a panel that reports only HDR10 (like
+> most setups behind an NVIDIA Shield) makes ClearVR reject HLG upstream and fall back to
+> 1620p SDR. The pipeline forces the EGL HDR advertise **and** spoofs the display-capability
+> check, so the core serves the 2160p tiles; the device's video pipeline then plays them as
+> HDR10 or a clean 4K SDR downconvert (the same path YouTube HLG uses). **Needs the arm64 build**
+> — see [Verify 4K is working](#verify-4k-is-working). Genuinely HLG-capable devices get full HDR;
+> HDR10-only panels get accurate 4K. An opt-in `F1TV_PQ_REROUTE` can push some setups to true
+> HDR10 output — see [Build options](#build-options).
 
 ## Installing on your Android TV
 
@@ -55,12 +69,20 @@ Or install manually:
 # Unzip the bundle
 mkdir f1tv && cd f1tv && unzip ../f1tv-uhd-patched.apkm
 
-# Install (adjust splits for your device — most Android TVs are arm64)
+# Install (most Android TVs — NVIDIA Shield, Chromecast, etc. — are arm64).
+# Use the arm64_v8a split; the 32-bit armeabi_v7a native libs can't sustain 4K.
 adb install-multiple base.apk \
-  config.armeabi_v7a.apk \
+  config.arm64_v8a.apk \
   config.en.apk \
   config.xhdpi.apk
 ```
+
+> **Install the `arm64_v8a` split, not `armeabi_v7a`.** The ClearVR decoder/renderer ships per
+> ABI. On an arm64 device (NVIDIA Shield included) the 32-bit split forces ClearVR to run in
+> 32-bit, which commonly can't allocate the 4K secure HEVC decoder — you get `TM4014` /
+> "acquireVdecResource not enough" errors. `install.sh` picks arm64 automatically when it's in
+> the bundle; a bundle with only `armeabi_v7a` (e.g. the APKPure fallback source) can't do
+> reliable 4K on the Shield.
 
 The install script accepts `.apkm`, `.xapk` files, or a directory of extracted APKs.
 
@@ -176,13 +198,70 @@ Only needed if running scripts locally outside CI:
 - Java, apktool, zipalign, apksigner
 - ADB (for install.sh)
 
+## Verify 4K is working
+
+After installing (on an **arm64** bundle, connected to an **HDR-capable TV**), start a session and
+watch the live decoder stats over ADB:
+
+```bash
+./scripts/stream_stats.sh 192.168.1.100:5555   # your TV's IP, or omit if on USB
+```
+
+You want to see, once the stream ramps up:
+
+- **Decoder Resolution: `3840x2160`** — full 4K. If it plateaus at `2880x1620`, the 2160p tier isn't
+  being served (see the checklist below).
+- **Video Codec: HEVC** and a healthy bitrate (≈15–25 Mbps).
+- On a genuinely HDR-capable device you'll also get **HDR10/HLG** output; on an HDR10-only panel
+  (e.g. many NVIDIA Shield setups) the 4K plays as a clean **SDR downconvert** — full resolution,
+  accurate colours, just not HDR's extra brightness/gamut. See [Build options](#build-options) to
+  push those setups toward true HDR10.
+
+The patched build also exposes the in-app **quality selector** so you can confirm `3840×2160` is
+offered (debug overlays are left off in release builds).
+
+If you're stuck at 1620p, check in order:
+
+1. **ABI** — `adb shell getprop ro.product.cpu.abi` should be `arm64-v8a`, and you must have installed
+   the `config.arm64_v8a.apk` split (not `armeabi_v7a`). A 32-bit install can't do 4K.
+2. **Build flags** — the bundle must be built with `F1TV_HLG_BYPASS` **and** `F1TV_DISPLAY_HDR_SPOOF`
+   on (both default; CI sets them). Public releases from before these defaults do **not** have them.
+3. **4K TV** — the panel must actually be 4K (the decode target follows the display). An HDR-capable
+   panel additionally gets HDR output.
+
 ## Applied patches
 
-| Patch | File | Method | What it does |
-|---|---|---|---|
-| UHD unlock | `DeviceSupportImpl.smali` | `validateIsUhdSupportedDevice()` | Always returns `Pair(true, null)` so 4K streams are served |
-| Quality button | `DiagnosticsPreferenceManagerImpl.smali` | `isVideoQualityEnabled()` | Always returns `true` so the quality selector is visible |
-| Direct-to-view | `RenderAPIConfig.smali` | `getNRPTextureBlitMode()` | Amlogic only (runtime check): bypasses Tiledmedia GPU tile composition, decoder outputs directly to SurfaceView. Fixes ~13% frame drops on Amlogic devices. Other devices use the default rendering path. |
+All patches are applied to every device (no runtime device gating) unless noted. The two that
+actually unlock 2160p are **HDR advertise** and **display-capability spoof**.
+
+| Patch | File · method | What it does |
+|---|---|---|
+| UHD / device unlock | `DeviceSupportImpl` · `validateIsUhdSupportedDevice`, `validateTmSdkSupport`, `validateLowRamDeviceSupport`, `validateApiLevelSupport` | Each returns `Pair(true, null)`, so the device passes every UHD-capability gate (brand/product whitelist, secure-decoder probe, low-RAM check, API-level check). |
+| **Display-capability spoof** *(2160p unlock)* | `DeviceParameters` · `doesDisplaySupport` | Returns `true` so the core believes the panel accepts F1's HLG and serves the **2160p tiles** instead of rejecting HLG upstream and dropping to 1620p SDR. Default on; disable with `F1TV_DISPLAY_HDR_SPOOF=0`. |
+| **HDR advertise** *(2160p unlock)* | `EGLRenderTarget` · `getIsBt2020HlgExtensionSupported` | Returns `true`, so `DeviceParameters` reports PQ+HLG EGL support and the backend offers the HDR 2160p tier. Default on; disable with `F1TV_HLG_BYPASS=0`. |
+| Quality selector | `DiagnosticsPreferenceManagerImpl` · `isVideoQualityEnabled` | Returns `true` so the in-app quality picker is visible. (The debug overlays are intentionally left off.) |
+| 4K display size | `TrueTVDisplaySizeHelper` · `getDefaultDisplaySize` | Hardcodes a `3840×2160` panel via `getTrueDisplaySizeIfTV`, lifting ClearVR's ~1.5× display-size cap (which otherwise limits a 1080p UI surface to `2880×1620`). |
+| PQ colour reroute *(correct colours)* | `RenderTargetConfig` · `requireHLG`, `require2020PQ` | Routes F1's HLG content through the EGL **PQ** colorspace the device supports (`requireHLG→false`, `require2020PQ→PQ‖HLG`) so the 4K tiles are correctly gamut-converted instead of shown washed-out. Default on; disable with `F1TV_PQ_REROUTE=0`. |
+| Render path | `RenderAPIConfig` · `getNRPTextureBlitMode` | **Default: EGL/GL path** (patch skipped) so ClearVR composites and does a correct BT.2020→Rec.709 conversion. Set `F1TV_DIRECT_TO_VIEW=1` to force `NATIVE_ANDROID_DIRECT_TO_VIEW` (decoder→SurfaceView) on weak/Amlogic GPUs that drop frames — at the cost of washed-out HDR colours. |
+| Decoder capability spoof | `DecoderCapability` · `getAsCoreProtobuf` | Reports non-zero secure tile slots/rows/cols (16/5/5) so the backend serves the full-resolution tile tier instead of a reduced one. |
+| NVIDIA workaround off | `Quirks` · `deviceNeedsNoPostProcessWorkaround` | Returns `false` so the decoder isn't forced into a lower-quality no-post-process path on NVIDIA devices. |
+| Device-model spoof | `TvApplication` · `getRequestHeader` | Sends `model=chromecast` in the `x-f1-device-info` header. |
+| Version tag | `apktool.yml`, `BuildConfig` | Appends `-UHD` to the version name so patched builds are identifiable. |
+
+## Build options
+
+`patch.sh` reads these environment variables (all default to the values below; CI uses the defaults):
+
+| Variable | Default | Effect |
+|---|---|---|
+| `F1TV_HLG_BYPASS` | `1` | Advertise EGL HDR (PQ+HLG) so the backend offers the 2160p tier. Required for 4K. |
+| `F1TV_DISPLAY_HDR_SPOOF` | `1` | Force the display-capability check to accept all HDR types so the core serves 2160p on HDR10-only panels. Required for 4K on the Shield. |
+| `F1TV_PQ_REROUTE` | `1` | Render the HDR tiles through the EGL PQ colorspace and gamut-convert them correctly (fixes washed-out colours). |
+| `F1TV_DIRECT_TO_VIEW` | `0` | Default off = EGL/GL render path with correct 4K colours. Set `1` to force decoder→SurfaceView direct rendering on weak/Amlogic GPUs that drop frames on the GL path (trades correct HDR colours for smoothness). |
+
+> **Result on an NVIDIA Shield + HDR10 TV:** true **3840×2160** with accurate colours, output as a
+> clean SDR downconvert (the Shield's GPU lacks the HLG EGL colorspace, so full HDR10 to the panel
+> isn't reliable — but the 4K resolution and colour accuracy are the wins).
 
 ## License
 
