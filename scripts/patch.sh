@@ -417,21 +417,22 @@ fi
 # intermediate resolutions during the quality ramp (e.g. 2560x1620).
 # The SDK has a built-in NATIVE_ANDROID_DIRECT_TO_VIEW mode that bypasses
 # GPU composition and outputs the decoder directly to the SurfaceView.
-# Fix: always return NATIVE_ANDROID_DIRECT_TO_VIEW for all devices.
 #
-# NOTE: direct-to-view tags the output surface with the CONTENT's transfer (HLG
-# for F1 UHD). On a device whose panel accepts HDR10 (PQ) but not HLG, the
-# compositor can't switch to an HLG mode and falls back to SDR output (accurate
-# but not HDR). Set F1TV_DIRECT_TO_VIEW=0 to skip this patch and use the EGL
-# render path instead, where the PQ reroute (F1TV_PQ_REROUTE) can build a real
-# BT2100_PQ surface and drive HDR10 output.
+# DEFAULT OFF. direct-to-view tags the output surface with the CONTENT's transfer
+# (HLG for F1 UHD) and does no gamut conversion. On a panel that accepts HDR10 but
+# not HLG the compositor can't switch modes and shows the BT.2020 frames through
+# an SDR/Rec.709 surface with no conversion — i.e. washed-out colours. The default
+# EGL/GL render path (this patch skipped) composites the tiles and does a correct
+# BT.2020→Rec.709 conversion, giving accurate 4K. Set F1TV_DIRECT_TO_VIEW=1 to
+# force direct-to-view on weak/Amlogic GPUs that drop frames on the GL path
+# (accepting the washed-out HDR look as the tradeoff).
 
 RENDER_CONFIG="$(find "${DECOMPILED}" -name 'RenderAPIConfig.smali' -path '*/tiledmedia/*' -print -quit 2>/dev/null || true)"
 
-if [[ "${F1TV_DIRECT_TO_VIEW:-1}" == "0" ]]; then
-    info "F1TV_DIRECT_TO_VIEW=0 — skipping direct-to-view (using EGL render path for HDR output)"
+if [[ "${F1TV_DIRECT_TO_VIEW:-0}" == "0" ]]; then
+    info "Using the EGL/GL render path for correct 4K colours (set F1TV_DIRECT_TO_VIEW=1 for weak/Amlogic GPUs)"
 elif [[ -n "${RENDER_CONFIG}" && -f "${RENDER_CONFIG}" ]]; then
-    info "Patching NRP blit mode to direct-to-view (all devices)..."
+    info "Patching NRP blit mode to direct-to-view (opt-in, for weak/Amlogic GPUs)..."
     python3 - "${RENDER_CONFIG}" << 'PYEOF'
 import sys
 
@@ -594,22 +595,22 @@ else
     warn "F1TV_HLG_BYPASS=0 — skipping HLG unlock; the 2160p tier will NOT be offered (SDR caps at 1620p)"
 fi
 
-# ─── EXPERIMENTAL: reroute HLG content to the PQ/HDR10 render path ──────────
-# (opt-in via F1TV_PQ_REROUTE=1)
+# ─── Reroute HLG content to the PQ render path (default ON) ─────────────────
 #
-# F1TV's 2160p is HLG. Some devices (notably the NVIDIA Shield) expose the EGL
-# BT2020 *PQ* colorspace (EGL_EXT_gl_colorspace_bt2020_pq) but NOT the *HLG* one,
-# and their panel accepts HDR10 (PQ) only. ClearVR tags F1 content requireHLG,
-# tries to create an HLG EGL surface (EGLRenderTarget surface-creation reads
-# RenderTargetConfig.requireHLG()/require2020PQ()), fails, and drops to SDR 1620p.
+# F1TV's 2160p is HLG. Many devices (notably the NVIDIA Shield) expose the EGL
+# BT2020 *PQ* colorspace (EGL_EXT_gl_colorspace_bt2020_pq) but NOT the *HLG* one.
+# On the EGL/GL render path ClearVR tags F1 content requireHLG and tries to create
+# an HLG EGL surface (EGLRenderTarget surface-creation reads
+# RenderTargetConfig.requireHLG()/require2020PQ()), which fails on those devices
+# and drops to SDR 1620p.
 #
 # This reroutes the render path: requireHLG() -> false, require2020PQ() -> (PQ||HLG),
-# so HLG content is rendered through the PQ colorspace the device DOES support.
-# SDR content (both flags false) is unaffected. The transfer curves differ, so
-# tone/brightness may be off — this is an experiment to see whether 2160p HDR10
-# can be coaxed out on HLG-incapable hardware. Requires F1TV_HLG_BYPASS on too.
-if [[ "${F1TV_PQ_REROUTE:-0}" == "1" ]]; then
-    info "F1TV_PQ_REROUTE=1 — rerouting HLG render path to PQ/HDR10..."
+# so the HDR tiles are rendered through the PQ colorspace the device DOES support
+# and correctly gamut-converted for output. SDR content (both flags false) is
+# unaffected. Pairs with the default EGL path (F1TV_DIRECT_TO_VIEW=0); it is inert
+# under direct-to-view. Set F1TV_PQ_REROUTE=0 to disable.
+if [[ "${F1TV_PQ_REROUTE:-1}" != "0" ]]; then
+    info "Rerouting HLG render path to the PQ colorspace (correct 4K colours)..."
     RTC_SMALI="$(find "${DECOMPILED}" -name 'RenderTargetConfig.smali' -path '*/tiledmedia/*' -print -quit)"
     if [[ -n "${RTC_SMALI}" ]]; then
         ok "Found: ${RTC_SMALI#${WORKDIR}/}"

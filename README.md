@@ -241,7 +241,8 @@ actually unlock 2160p are **HDR advertise** and **display-capability spoof**.
 | **HDR advertise** *(2160p unlock)* | `EGLRenderTarget` · `getIsBt2020HlgExtensionSupported` | Returns `true`, so `DeviceParameters` reports PQ+HLG EGL support and the backend offers the HDR 2160p tier. Default on; disable with `F1TV_HLG_BYPASS=0`. |
 | Quality selector | `DiagnosticsPreferenceManagerImpl` · `isVideoQualityEnabled` | Returns `true` so the in-app quality picker is visible. (The debug overlays are intentionally left off.) |
 | 4K display size | `TrueTVDisplaySizeHelper` · `getDefaultDisplaySize` | Hardcodes a `3840×2160` panel via `getTrueDisplaySizeIfTV`, lifting ClearVR's ~1.5× display-size cap (which otherwise limits a 1080p UI surface to `2880×1620`). |
-| Direct-to-view render | `RenderAPIConfig` · `getNRPTextureBlitMode` | Returns `NATIVE_ANDROID_DIRECT_TO_VIEW`: the decoder outputs straight to the SurfaceView, bypassing GPU/EGL tile composition (fewer frame drops; lets the video pipeline handle HDR). Disable with `F1TV_DIRECT_TO_VIEW=0` to use the EGL path. |
+| PQ colour reroute *(correct colours)* | `RenderTargetConfig` · `requireHLG`, `require2020PQ` | Routes F1's HLG content through the EGL **PQ** colorspace the device supports (`requireHLG→false`, `require2020PQ→PQ‖HLG`) so the 4K tiles are correctly gamut-converted instead of shown washed-out. Default on; disable with `F1TV_PQ_REROUTE=0`. |
+| Render path | `RenderAPIConfig` · `getNRPTextureBlitMode` | **Default: EGL/GL path** (patch skipped) so ClearVR composites and does a correct BT.2020→Rec.709 conversion. Set `F1TV_DIRECT_TO_VIEW=1` to force `NATIVE_ANDROID_DIRECT_TO_VIEW` (decoder→SurfaceView) on weak/Amlogic GPUs that drop frames — at the cost of washed-out HDR colours. |
 | Decoder capability spoof | `DecoderCapability` · `getAsCoreProtobuf` | Reports non-zero secure tile slots/rows/cols (16/5/5) so the backend serves the full-resolution tile tier instead of a reduced one. |
 | NVIDIA workaround off | `Quirks` · `deviceNeedsNoPostProcessWorkaround` | Returns `false` so the decoder isn't forced into a lower-quality no-post-process path on NVIDIA devices. |
 | Device-model spoof | `TvApplication` · `getRequestHeader` | Sends `model=chromecast` in the `x-f1-device-info` header. |
@@ -255,8 +256,12 @@ actually unlock 2160p are **HDR advertise** and **display-capability spoof**.
 |---|---|---|
 | `F1TV_HLG_BYPASS` | `1` | Advertise EGL HDR (PQ+HLG) so the backend offers the 2160p tier. Required for 4K. |
 | `F1TV_DISPLAY_HDR_SPOOF` | `1` | Force the display-capability check to accept all HDR types so the core serves 2160p on HDR10-only panels. Required for 4K on the Shield. |
-| `F1TV_DIRECT_TO_VIEW` | `1` | Decoder → SurfaceView directly. Set `0` to use the EGL render path (needed for `F1TV_PQ_REROUTE`). |
-| `F1TV_PQ_REROUTE` | `0` | **Experimental.** Render HLG content through the PQ/HDR10 colorspace. With `F1TV_DIRECT_TO_VIEW=0` this can drive true HDR10 output on HDR10-only panels, but the EGL path may drop frames — test before relying on it. |
+| `F1TV_PQ_REROUTE` | `1` | Render the HDR tiles through the EGL PQ colorspace and gamut-convert them correctly (fixes washed-out colours). |
+| `F1TV_DIRECT_TO_VIEW` | `0` | Default off = EGL/GL render path with correct 4K colours. Set `1` to force decoder→SurfaceView direct rendering on weak/Amlogic GPUs that drop frames on the GL path (trades correct HDR colours for smoothness). |
+
+> **Result on an NVIDIA Shield + HDR10 TV:** true **3840×2160** with accurate colours, output as a
+> clean SDR downconvert (the Shield's GPU lacks the HLG EGL colorspace, so full HDR10 to the panel
+> isn't reliable — but the 4K resolution and colour accuracy are the wins).
 
 ## License
 
