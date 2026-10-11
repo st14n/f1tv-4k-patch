@@ -21,6 +21,7 @@ permissions:
 
 env:
   APKTOOL_VERSION: "2.10.0"
+  APKEDITOR_VERSION: "1.4.9"
   APKEEP_VERSION: "0.18.0"
   APKEEP_CUSTOM_TAG: "v0.18.1-shield"
   PLAYWRIGHT_BROWSERS_PATH: /home/runner/.cache/ms-playwright
@@ -181,6 +182,11 @@ jobs:
           java -jar /usr/local/bin/apktool.jar "$@"
           WRAPPER
           chmod +x /usr/local/bin/apktool
+
+      - name: Install APKEditor (universal APK merge)
+        run: |
+          curl -sSL "https://github.com/REAndroid/APKEditor/releases/download/V${APKEDITOR_VERSION}/APKEditor-${APKEDITOR_VERSION}.jar" -o /usr/local/bin/APKEditor.jar
+          echo "APKEDITOR_JAR=/usr/local/bin/APKEditor.jar" >> "$GITHUB_ENV"
 
       - name: Set up Android SDK tools
         run: |
@@ -423,6 +429,8 @@ jobs:
           F1TV_DISPLAY_HDR_SPOOF: "1"
           F1TV_DIRECT_TO_VIEW: "0"
           F1TV_PQ_REROUTE: "1"
+          # Repo variable F1TV_UHD_PATCHES=0 skips all UHD unlock/spoof patches (stock playback).
+          F1TV_UHD_PATCHES: ${{ vars.F1TV_UHD_PATCHES || '1' }}
           # Optional custom radio audio (README: "Custom radio audio"). Empty = off.
           # Note: the URL ends up inside the published APK.
           F1TV_CUSTOM_AUDIO_URL: ${{ vars.F1TV_CUSTOM_AUDIO_URL || secrets.F1TV_CUSTOM_AUDIO_URL }}
@@ -488,7 +496,10 @@ jobs:
 
           ## Install
 
-          Download \`f1tv-uhd-patched.apkm\` below, then use the install script:
+          **Easiest:** download \`f1tv-patched-universal.apk\` (all CPU types in one file) and install it
+          with \`adb install -r f1tv-patched-universal.apk\`, a file manager, or an updater app such as Obtainium.
+
+          **Split bundle:** download \`f1tv-uhd-patched.apkm\` below, then use the install script:
 
           \`\`\`bash
           ./scripts/install.sh f1tv-uhd-patched.apkm [device-ip:5555]
@@ -497,7 +508,8 @@ jobs:
           See the [README](https://github.com/${{ github.repository }}#installing-on-your-android-tv) for full setup instructions.
           NOTES
           )" \
-            output/f1tv-uhd-patched.apkm
+            output/f1tv-uhd-patched.apkm \
+            $(ls output/f1tv-patched-universal.apk 2>/dev/null)
 
           echo "release_url=https://github.com/${{ github.repository }}/releases/tag/${TAG}" >> "$GITHUB_OUTPUT"
         env:

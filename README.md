@@ -255,6 +255,7 @@ actually unlock 2160p are **HDR advertise** and **display-capability spoof**.
 
 | Variable | Default | Effect |
 |---|---|---|
+| `F1TV_UNIVERSAL_APK` | `1` | Also output `f1tv-patched-universal.apk`: every split in the bundle merged into one APK (installs with `adb install -r`, a file manager, or an updater app such as [Obtainium](https://github.com/ImranR98/Obtainium) watching your fork's releases). Needs `APKEDITOR_JAR` pointing at an [APKEditor](https://github.com/REAndroid/APKEditor) jar (CI downloads it). Only contains the ABIs the source bundle had — Google Play source gives arm64 + armeabi-v7a, APKPure only armeabi-v7a. |
 | `F1TV_UHD_PATCHES` | `1` | Master switch. `0` skips **all** UHD unlock/spoof and render-path patches (everything in the table above except the quality selector and version tag), leaving playback exactly as shipped — for devices the stock app already serves UHD to, e.g. to add only the custom radio. Version tag becomes `-RADIO`. |
 | `F1TV_HLG_BYPASS` | `1` | Advertise EGL HDR (PQ+HLG) so the backend offers the 2160p tier. Required for 4K. |
 | `F1TV_DISPLAY_HDR_SPOOF` | `1` | Force the display-capability check to accept all HDR types so the core serves 2160p on HDR10-only panels. Required for 4K on the Shield. |
