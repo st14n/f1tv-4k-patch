@@ -1007,6 +1007,36 @@ APKM_OUTPUT="${OUTPUT_DIR}/f1tv-uhd-patched.apkm"
 (cd "${OUTPUT_DIR}" && zip -q "${APKM_OUTPUT}" *.apk info.json 2>/dev/null || zip -q "${APKM_OUTPUT}" *.apk)
 ok "Created patched bundle: ${APKM_OUTPUT}"
 
+# ─── Universal APK (all splits merged into one installable .apk) ────────────
+#
+# One .apk with every ABI/language/density split in the bundle merged in, so it
+# installs with a plain `adb install`, a file manager or an updater app such as
+# Obtainium — no split-APK installer needed. Android picks the right native libs at
+# install time. Needs an APKEditor jar (APKEDITOR_JAR); set F1TV_UNIVERSAL_APK=0 to skip.
+UNIVERSAL_OUTPUT=""
+if [[ "${F1TV_UNIVERSAL_APK:-1}" != "0" ]]; then
+    if [[ -n "${APKEDITOR_JAR:-}" && -f "${APKEDITOR_JAR}" ]]; then
+        info "Merging all splits into a universal APK..."
+        MERGE_IN="${WORKDIR}/merge_in"
+        mkdir -p "${MERGE_IN}"
+        cp "${ALIGNED_DIR}"/*.apk "${MERGE_IN}/"
+        java -jar "${APKEDITOR_JAR}" m -i "${MERGE_IN}" -o "${WORKDIR}/universal-merged.apk" >/dev/null \
+            || die "APKEditor merge failed"
+        # Drop the signature carried over from base.apk (keep META-INF/services etc.).
+        zip -qd "${WORKDIR}/universal-merged.apk" 'META-INF/*.RSA' 'META-INF/*.DSA' 'META-INF/*.EC' \
+            'META-INF/*.SF' 'META-INF/MANIFEST.MF' 2>/dev/null || true
+        UNIVERSAL_OUTPUT="${OUTPUT_DIR}/f1tv-patched-universal.apk"
+        zipalign -f 4 "${WORKDIR}/universal-merged.apk" "${UNIVERSAL_OUTPUT}"
+        apksigner sign "${SIGN_ARGS[@]}" "${UNIVERSAL_OUTPUT}"
+        ok "Created universal APK: ${UNIVERSAL_OUTPUT}"
+        if ! printf '%s\n' "${ALL_APKS[@]}" | grep -q 'arm64_v8a'; then
+            warn "Universal APK has no arm64-v8a libs (source bundle lacked them); arm64 devices run it 32-bit."
+        fi
+    else
+        warn "APKEDITOR_JAR not set — skipping universal APK (bundle output only)"
+    fi
+fi
+
 # ─── Done ─────────────────────────────────────────────────────────────────────
 
 echo ""
@@ -1016,6 +1046,9 @@ ok "======================================"
 echo ""
 info "Output directory: ${OUTPUT_DIR}"
 info "Patched bundle:   ${APKM_OUTPUT}"
+if [[ -n "${UNIVERSAL_OUTPUT}" ]]; then
+    info "Universal APK:    ${UNIVERSAL_OUTPUT}  (adb install -r <file>)"
+fi
 echo ""
 info "To install on your device:"
 info "  ./scripts/install.sh ${APKM_OUTPUT} [device-ip:5555]"
