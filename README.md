@@ -255,6 +255,7 @@ actually unlock 2160p are **HDR advertise** and **display-capability spoof**.
 
 | Variable | Default | Effect |
 |---|---|---|
+| `F1TV_UHD_PATCHES` | `1` | Master switch. `0` skips **all** UHD unlock/spoof and render-path patches (everything in the table above except the quality selector and version tag), leaving playback exactly as shipped — for devices the stock app already serves UHD to, e.g. to add only the custom radio. Version tag becomes `-RADIO`. |
 | `F1TV_HLG_BYPASS` | `1` | Advertise EGL HDR (PQ+HLG) so the backend offers the 2160p tier. Required for 4K. |
 | `F1TV_DISPLAY_HDR_SPOOF` | `1` | Force the display-capability check to accept all HDR types so the core serves 2160p on HDR10-only panels. Required for 4K on the Shield. |
 | `F1TV_PQ_REROUTE` | `1` | Render the HDR tiles through the EGL PQ colorspace and gamut-convert them correctly (fixes washed-out colours). |

@@ -106,7 +106,21 @@ info "Decompiling base.apk with apktool..."
 apktool d -f -o "${DECOMPILED}" "${BASE_APK}" >/dev/null 2>&1 || die "apktool decompile failed"
 ok "Decompiled successfully"
 
+# ─── UHD unlock switch ───────────────────────────────────────────────────────
+#
+# F1TV_UHD_PATCHES=0 skips every device/capability spoof and render-path change
+# below (UHD whitelist bypass, model spoof, decoder-capability spoof, NVIDIA quirk,
+# display-size spoof, HLG advertise, PQ reroute, display-HDR spoof), leaving F1TV's
+# playback code exactly as shipped. Use it on devices the stock app already serves
+# UHD to, e.g. to add only the custom radio.
+UHD_PATCHES="${F1TV_UHD_PATCHES:-1}"
+if [[ "${UHD_PATCHES}" == "0" ]]; then
+    warn "F1TV_UHD_PATCHES=0 — skipping all UHD unlock / spoof patches (stock playback)"
+fi
+
 # ─── Patch smali ──────────────────────────────────────────────────────────────
+
+if [[ "${UHD_PATCHES}" != "0" ]]; then
 
 info "Searching for DeviceSupportImpl.smali..."
 SMALI_FILE="$(find "${DECOMPILED}" -name 'DeviceSupportImpl.smali' -path '*/tiledmediaplayer/*' -print -quit)"
@@ -196,6 +210,7 @@ PYEOF
 
 [[ $? -eq 0 ]] || die "Smali patching failed"
 ok "DeviceSupportImpl validators patched"
+fi # UHD_PATCHES
 
 # ─── Patch diagnostics preferences ──────────────────────────────────────────
 
@@ -257,6 +272,8 @@ PYEOF
 else
     warn "DiagnosticsPreferenceManagerImpl.smali not found, skipping diagnostics patch"
 fi
+
+if [[ "${UHD_PATCHES}" != "0" ]]; then
 
 # ─── Spoof device model in request header ────────────────────────────────────
 
@@ -708,6 +725,7 @@ PYEOF
         warn "DeviceParameters.smali not found, skipping display HDR spoof"
     fi
 fi
+fi # UHD_PATCHES
 
 # ─── Custom radio audio (opt-in: set F1TV_CUSTOM_AUDIO_URL) ─────────────────
 #
@@ -826,10 +844,18 @@ fi
 
 info "Patching version name..."
 
+if [[ "${UHD_PATCHES}" != "0" ]]; then
+    VERSION_SUFFIX="-UHD"
+elif [[ -n "${F1TV_CUSTOM_AUDIO_URL:-}" ]]; then
+    VERSION_SUFFIX="-RADIO"
+else
+    VERSION_SUFFIX="-PATCHED"
+fi
+
 # Patch apktool.yml (manifest versionName)
 APKTOOL_YML="${DECOMPILED}/apktool.yml"
 if [[ -f "${APKTOOL_YML}" ]]; then
-    sed -i 's/\(versionName: .*\)/\1-UHD/' "${APKTOOL_YML}"
+    sed -i "s/\(versionName: .*\)/\1${VERSION_SUFFIX}/" "${APKTOOL_YML}"
     ok "Manifest versionName updated"
 fi
 
@@ -837,13 +863,13 @@ fi
 BUILDCONFIG="$(find "${DECOMPILED}" -name 'BuildConfig.smali' -path '*/formulaone/*' -print -quit)"
 if [[ -n "${BUILDCONFIG}" ]]; then
     # VERSION_NAME is a const-string like: const-string v0, "3.0.47.1-SP153..."
-    sed -i '/:->VERSION_NAME:Ljava\/lang\/String;/,/const-string/{s/\(const-string [^,]*, "\)\([^"]*\)"/\1\2-UHD"/}' "${BUILDCONFIG}"
+    sed -i '/:->VERSION_NAME:Ljava\/lang\/String;/,/const-string/{s/\(const-string [^,]*, "\)\([^"]*\)"/\1\2'"${VERSION_SUFFIX}"'"/}' "${BUILDCONFIG}"
     ok "BuildConfig VERSION_NAME updated"
 else
     # Fallback: search all BuildConfig.smali files
     BUILDCONFIG="$(find "${DECOMPILED}" -name 'BuildConfig.smali' -print -quit)"
     if [[ -n "${BUILDCONFIG}" ]]; then
-        sed -i '/VERSION_NAME/s/\(const-string [^,]*, "\)\([^"]*\)"/\1\2-UHD"/' "${BUILDCONFIG}"
+        sed -i '/VERSION_NAME/s/\(const-string [^,]*, "\)\([^"]*\)"/\1\2'"${VERSION_SUFFIX}"'"/' "${BUILDCONFIG}"
         ok "BuildConfig VERSION_NAME updated (fallback)"
     else
         warn "BuildConfig.smali not found, skipping in-app version patch"
