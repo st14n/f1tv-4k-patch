@@ -247,6 +247,7 @@ actually unlock 2160p are **HDR advertise** and **display-capability spoof**.
 | NVIDIA workaround off | `Quirks` · `deviceNeedsNoPostProcessWorkaround` | Returns `false` so the decoder isn't forced into a lower-quality no-post-process path on NVIDIA devices. |
 | Device-model spoof | `TvApplication` · `getRequestHeader` | Sends `model=chromecast` in the `x-f1-device-info` header. |
 | Version tag | `apktool.yml`, `BuildConfig` | Appends `-UHD` to the version name so patched builds are identifiable. |
+| Custom radio *(opt-in)* | `TiledPlayer` · `<init>`, `TiledPlayerActivityTv` · `dispatchKeyEvent` | Only with `F1TV_CUSTOM_AUDIO_URL` set — see [Custom radio audio](#custom-radio-audio-optional). |
 
 ## Build options
 
@@ -262,6 +263,46 @@ actually unlock 2160p are **HDR advertise** and **display-capability spoof**.
 > **Result on an NVIDIA Shield + HDR10 TV:** true **3840×2160** with accurate colours, output as a
 > clean SDR downconvert (the Shield's GPU lacks the HLG EGL colorspace, so full HDR10 to the panel
 > isn't reliable — but the 4K resolution and colour accuracy are the wins).
+
+## Custom radio audio (optional)
+
+Replace the F1 commentary with a radio stream (e.g. a local-language radio commentary) on live
+sessions, automatically kept in sync with the picture. Off unless `F1TV_CUSTOM_AUDIO_URL` is set.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `F1TV_CUSTOM_AUDIO_URL` | *(unset)* | Direct Icecast/SHOUTcast **MP3 or AAC** stream URL (redirects such as StreamTheWorld's `livestream-redirect` are fine). HLS `.m3u8` is not supported. |
+| `F1TV_CUSTOM_AUDIO_ADJUST_MS` | `0` | Starting sync adjustment; you normally fine-tune it on the TV instead. |
+| `F1TV_CUSTOM_AUDIO_FALLBACK_MS` | `20000` | Base delay used only if ClearVR reports no wall clock for the stream. |
+| `F1TV_CUSTOM_AUDIO_ENABLED` | `1` | Whether the radio is on by default (toggle on the TV). |
+
+In CI, set them as repository **variables** (or a secret for the URL) — the workflow passes them
+through. The URL is compiled into the APK, so it is visible in your published release.
+
+**How the auto-sync works.** ClearVR reports the wall-clock time of the frame on screen. The
+patch plays the radio delayed by *video lag* (now − that wall clock) plus your adjustment, so it
+follows stream start-up latency, pausing, rewinding and timeshift on its own. The adjustment only
+absorbs the radio's own broadcast latency, so you calibrate it once per station. The radio is
+buffered (up to 150 s); until enough is buffered — and whenever it can't cover the moment you're
+watching — you hear the normal F1 audio. Replays/VOD always use the F1 audio.
+
+**On the TV** (during playback) press **MENU** or a **colour key**, or **long-press OK**:
+
+| Key | Action |
+|---|---|
+| ◀ / ▶ | Radio 0.25 s earlier / later |
+| ▼ / ▲ | Radio 1 s earlier / later |
+| OK | Radio on/off |
+| BACK | Close |
+
+Settings are remembered. Logs: `adb logcat -s F1Radio`.
+
+The player code is in [`extension/`](extension/) (plain Java, platform APIs only) and is compiled
+by `patch.sh` into an extra `classesN.dex`; it needs an Android SDK (`ANDROID_HOME` with a
+platform and build-tools — preinstalled on GitHub's Ubuntu runners). Two smali hooks are added:
+`TiledPlayer.<init>` and `TiledPlayerActivityTv.dispatchKeyEvent`. If an F1TV update renames
+anything the extension calls, the build fails with a clear message rather than shipping a broken
+APK.
 
 ## License
 

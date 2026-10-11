@@ -709,6 +709,119 @@ PYEOF
     fi
 fi
 
+# ─── Custom radio audio (opt-in: set F1TV_CUSTOM_AUDIO_URL) ─────────────────
+#
+# Plays an Icecast/SHOUTcast MP3/AAC radio stream instead of the F1 commentary on
+# live sessions, auto-synced to the picture. The player code lives in extension/
+# (compiled to an extra classesN.dex); here we only add two hooks:
+#   TiledPlayer.<init>                     -> RadioPatch.onPlayerCreated(this, activity)
+#   TiledPlayerActivityTv.dispatchKeyEvent -> RadioPatch.onKeyEvent(activity, event)
+# Sync: radio delay = (now - wall clock of the frame on screen) + a user adjustment
+# that is calibrated once with the remote (MENU/colour key or long-press OK).
+
+RADIO_DEX=""
+if [[ -n "${F1TV_CUSTOM_AUDIO_URL:-}" ]]; then
+    info "Adding custom radio audio..."
+    PATCH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    RADIO_DEX="${WORKDIR}/radio.dex"
+    bash "${PATCH_SCRIPT_DIR}/../extension/build.sh" "${RADIO_DEX}" || die "Custom radio extension build failed"
+
+    python3 - "${DECOMPILED}" << 'PYEOF'
+import sys, re, pathlib
+
+root = pathlib.Path(sys.argv[1])
+
+def find(rel):
+    hits = list(root.glob(f"smali*/{rel}"))
+    if len(hits) != 1:
+        print(f"ERROR: expected one {rel}, found {len(hits)}", file=sys.stderr); sys.exit(1)
+    return hits[0]
+
+TP = 'Lcom/avs/f1/ui/tiledmediaplayer/TiledPlayer;'
+# Everything the extension calls. If F1TV/ClearVR renames any of these, fail loudly
+# instead of shipping a build that would throw NoSuchMethodError at runtime.
+required = {
+    'com/avs/f1/ui/tiledmediaplayer/TiledPlayer.smali': [
+        f'.method public static final synthetic access$getViewsHolder$p({TP})Lcom/avs/f1/ui/tiledmediaplayer/TiledPlayer$ViewsHolder;',
+        f'.method public static final synthetic access$getPlayer({TP})Lcom/tiledmedia/clearvrplayer/TiledmediaPlayer;',
+        '.method public final isLiveContent()Z',
+        '.method public final isPlaying()Z',
+        '.field private final activity:Landroidx/appcompat/app/AppCompatActivity;',
+    ],
+    'com/avs/f1/ui/tiledmediaplayer/TiledPlayer$ViewsHolder.smali': [
+        '.method public abstract getMainView()Lcom/tiledmedia/clearvrview/TiledmediaView;',
+    ],
+    'com/tiledmedia/clearvrview/TiledmediaView.smali': [
+        '.method public getCurrentTimingReport(Lcom/tiledmedia/clearvrenums/TimingType;)Lcom/tiledmedia/clearvrparameters/TimingReport;',
+    ],
+    'com/tiledmedia/clearvrparameters/TimingReport.smali': [
+        '.method public getIsSuccess()Z',
+        '.method public getCurrentPositionInMilliseconds()J',
+        '.method public getTimeShiftInMilliseconds()J',
+        '.method public isWallclockTimeSourceBased()Z',
+    ],
+    'com/tiledmedia/clearvrplayer/TiledmediaPlayer.smali': [
+        '.method public muteAudio(Z)Z',
+        '.method public getIsAudioMuted()Z',
+    ],
+    'com/tiledmedia/clearvrenums/TimingType.smali': [
+        'WALLCLOCK_TIME:Lcom/tiledmedia/clearvrenums/TimingType;',
+        'TIMESHIFT:Lcom/tiledmedia/clearvrenums/TimingType;',
+    ],
+}
+for rel, needles in required.items():
+    text = find(rel).read_text()
+    for needle in needles:
+        if needle not in text:
+            print(f"ERROR: {rel} lacks {needle}", file=sys.stderr); sys.exit(1)
+
+# Hook 1: end of the TiledPlayer constructor.
+path = find('com/avs/f1/ui/tiledmediaplayer/TiledPlayer.smali')
+content = path.read_text()
+m = re.search(r'\.method public constructor <init>\(Landroidx/appcompat/app/AppCompatActivity;.*?\.end method', content, re.DOTALL)
+if not m:
+    print("ERROR: TiledPlayer constructor not found", file=sys.stderr); sys.exit(1)
+ctor = m.group(0)
+if ctor.count('return-void') != 1 or not re.search(r'\.locals [1-9]', ctor):
+    print("ERROR: unexpected TiledPlayer constructor shape", file=sys.stderr); sys.exit(1)
+hooked = ctor.replace('    return-void', f"""    # Custom radio patch
+    iget-object v0, p0, {TP}->activity:Landroidx/appcompat/app/AppCompatActivity;
+
+    invoke-static {{p0, v0}}, Lcom/f1tvpatch/radio/RadioPatch;->onPlayerCreated(Ljava/lang/Object;Landroid/app/Activity;)V
+
+    return-void""")
+path.write_text(content.replace(ctor, hooked))
+print("  Hooked TiledPlayer.<init>")
+
+# Hook 2: start of TiledPlayerActivityTv.dispatchKeyEvent (sync/toggle overlay keys).
+path = find('com/avs/f1/ui/tiledmediaplayer/TiledPlayerActivityTv.smali')
+content = path.read_text()
+pattern = r'(\.method public dispatchKeyEvent\(Landroid/view/KeyEvent;\)Z\n\s*\.locals [1-9]\d*\n)'
+hook = r"""\1
+    # Custom radio patch
+    invoke-static {p0, p1}, Lcom/f1tvpatch/radio/RadioPatch;->onKeyEvent(Landroid/app/Activity;Landroid/view/KeyEvent;)Z
+
+    move-result v0
+
+    if-eqz v0, :f1radio_not_consumed
+
+    const/4 v0, 0x1
+
+    return v0
+
+    :f1radio_not_consumed
+"""
+content, n = re.subn(pattern, hook, content, count=1)
+if n != 1:
+    print("ERROR: TiledPlayerActivityTv.dispatchKeyEvent not found", file=sys.stderr); sys.exit(1)
+path.write_text(content)
+print("  Hooked TiledPlayerActivityTv.dispatchKeyEvent")
+PYEOF
+    ok "Custom radio hooks applied (dex is injected after rebuild)"
+else
+    info "F1TV_CUSTOM_AUDIO_URL not set, skipping custom radio audio"
+fi
+
 # ─── Patch version name ─────────────────────────────────────────────────────
 
 info "Patching version name..."
@@ -752,6 +865,13 @@ cp "${BASE_APK}" "${PATCHED_BASE}"
 
 mkdir -p "${WORKDIR}/inject_tmp"
 (cd "${WORKDIR}/inject_tmp" && unzip -q "${WORKDIR}/rebuilt/base-rebuilt.apk" 'classes*.dex' 'AndroidManifest.xml')
+
+if [[ -n "${RADIO_DEX}" ]]; then
+    # Append the custom radio extension as the next classesN.dex (classes.dex counts as 1).
+    LAST_DEX="$(cd "${WORKDIR}/inject_tmp" && ls classes*.dex | sed -E 's/classes([0-9]*)\.dex/\1/; s/^$/1/' | sort -n | tail -1)"
+    cp "${RADIO_DEX}" "${WORKDIR}/inject_tmp/classes$((LAST_DEX + 1)).dex"
+    ok "Custom radio extension added as classes$((LAST_DEX + 1)).dex"
+fi
 
 zip -qd "${PATCHED_BASE}" 'META-INF/*' 2>/dev/null || true
 zip -qd "${PATCHED_BASE}" 'classes*.dex' 2>/dev/null || true

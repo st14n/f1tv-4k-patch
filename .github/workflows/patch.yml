@@ -423,6 +423,11 @@ jobs:
           F1TV_DISPLAY_HDR_SPOOF: "1"
           F1TV_DIRECT_TO_VIEW: "0"
           F1TV_PQ_REROUTE: "1"
+          # Optional custom radio audio (README: "Custom radio audio"). Empty = off.
+          # Note: the URL ends up inside the published APK.
+          F1TV_CUSTOM_AUDIO_URL: ${{ vars.F1TV_CUSTOM_AUDIO_URL || secrets.F1TV_CUSTOM_AUDIO_URL }}
+          F1TV_CUSTOM_AUDIO_ADJUST_MS: ${{ vars.F1TV_CUSTOM_AUDIO_ADJUST_MS }}
+          F1TV_CUSTOM_AUDIO_FALLBACK_MS: ${{ vars.F1TV_CUSTOM_AUDIO_FALLBACK_MS }}
           KEYSTORE_PATH: ${{ env.KEYSTORE_PATH || '' }}
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'android' }}
           KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS || 'f1tvpatch' }}
