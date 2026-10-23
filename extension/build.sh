@@ -9,6 +9,8 @@ set -euo pipefail
 #   F1TV_CUSTOM_AUDIO_ADJUST_MS   Initial sync adjustment in ms (default 0; tune on the TV)
 #   F1TV_CUSTOM_AUDIO_FALLBACK_MS Base delay when ClearVR reports no wall clock (default 20000)
 #   F1TV_CUSTOM_AUDIO_ENABLED     1/0 - radio on by default (default 1)
+#   F1TV_UPDATE_REPO              GitHub owner/repo whose releases the in-app updater follows (empty = off)
+#   F1TV_RELEASE_TAG / F1TV_BUILD_RUN  Release tag and CI run id of this build (set by CI)
 #   ANDROID_HOME / ANDROID_SDK_ROOT  Android SDK with a platform and build-tools installed
 
 OUT_DEX="$1"
@@ -33,6 +35,12 @@ ADJUST_MS="${F1TV_CUSTOM_AUDIO_ADJUST_MS:-0}"
 FALLBACK_MS="${F1TV_CUSTOM_AUDIO_FALLBACK_MS:-20000}"
 [[ "${ADJUST_MS}" =~ ^-?[0-9]+$ && "${FALLBACK_MS}" =~ ^[0-9]+$ ]] || { echo "ms values must be integers" >&2; exit 1; }
 ENABLED=true
+UPDATE_REPO="${F1TV_UPDATE_REPO:-}"
+RELEASE_TAG="${F1TV_RELEASE_TAG:-}"
+BUILD_RUN="${F1TV_BUILD_RUN:-}"
+for v in "${UPDATE_REPO}" "${RELEASE_TAG}" "${BUILD_RUN}"; do
+    [[ "${v}" =~ ^[A-Za-z0-9._/-]*$ ]] || { echo "F1TV_UPDATE_REPO/RELEASE_TAG/BUILD_RUN may only use [A-Za-z0-9._/-]" >&2; exit 1; }
+done
 [[ "${F1TV_CUSTOM_AUDIO_ENABLED:-1}" == "0" ]] && ENABLED=false
 
 # Git Bash on Windows: hand native tools Windows paths. No-op on Linux/macOS.
@@ -55,6 +63,10 @@ final class Config {
     static final long DEFAULT_ADJUST_MS = ${ADJUST_MS}L;
     static final long FALLBACK_DELAY_MS = ${FALLBACK_MS}L;
     static final boolean DEFAULT_ENABLED = ${ENABLED};
+    // Self-update (empty repo = off): GitHub "owner/repo", and which release/CI run this build is
+    static final String UPDATE_REPO = "${UPDATE_REPO}";
+    static final String RELEASE_TAG = "${RELEASE_TAG}";
+    static final String BUILD_RUN = "${BUILD_RUN}";
 
     private Config() { }
 }
