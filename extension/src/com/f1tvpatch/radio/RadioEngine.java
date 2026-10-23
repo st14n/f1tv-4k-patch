@@ -32,6 +32,8 @@ import java.util.Locale;
  */
 final class RadioEngine {
     static final String TAG = "F1Radio";
+    /** Fingerprint of the radio audio as it is heard, for acoustic sync against the F1 audio. */
+    static final AcousticFeatures RADIO_AUDIO = new AcousticFeatures();
 
     enum State { CONNECTING, BUFFERING, PLAYING, VIDEO_AHEAD, BUFFER_EXCEEDED, PAUSED, ERROR }
 
@@ -351,6 +353,9 @@ final class RadioEngine {
                 if (!trackPlaying) {
                     track.play();
                     trackPlaying = true;
+                }
+                if (audible == chunkFrames && RadioPatch.isAcousticTapWanted()) {
+                    RADIO_AUDIO.addPcm16(chunk, chunk.length, sampleRate, source.channels, heardAtMs);
                 }
                 int written = track.write(chunk, 0, chunk.length);
                 if (written > 0) framesWritten += written / source.channels;

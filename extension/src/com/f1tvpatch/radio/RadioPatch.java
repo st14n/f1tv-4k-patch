@@ -3,18 +3,12 @@ package com.f1tvpatch.radio;
 import android.app.Activity;
 import android.app.Application;
 import android.content.SharedPreferences;
-import android.graphics.Color;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
-import android.util.TypedValue;
-import android.view.Gravity;
 import android.view.KeyEvent;
-import android.view.ViewGroup;
-import android.widget.FrameLayout;
-import android.widget.TextView;
 
 import com.avs.f1.ui.tiledmediaplayer.TiledPlayer;
 import com.tiledmedia.clearvrenums.TimingType;
@@ -25,15 +19,18 @@ import com.tiledmedia.clearvrview.TiledmediaView;
 import java.lang.ref.WeakReference;
 import java.util.ArrayDeque;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Entry points called from the patched F1TV smali, plus the controller that keeps the custom
  * radio in sync with the ClearVR video.
  *
- * Sync model: radio delay = video lag + user adjustment. Video lag is "now minus the wall-clock
- * time of the frame on screen" from ClearVR's WALLCLOCK_TIME timing report, so it automatically
- * follows stream start-up latency, pauses, rewinds and timeshift. The user adjustment absorbs the
- * radio's own broadcast latency and only needs calibrating once per station.
+ * Sync model (auto-sync): radio delay = video lag + adjustment. Video lag is "now minus the
+ * wall-clock time of the frame on screen" from ClearVR's WALLCLOCK_TIME timing report, so it
+ * follows stream start-up latency, pauses, rewinds and timeshift. The adjustment covers the
+ * radio's own latency; acoustic sync keeps it right by matching the circuit sound under the radio
+ * commentary to the F1 audio. With auto-sync off the radio plays at a fixed, manual delay.
  *
  * Every call into F1TV/ClearVR is wrapped: if an app update renames something, the radio turns
  * itself off instead of crashing the player.
@@ -43,17 +40,35 @@ public final class RadioPatch {
     private static final String PREFS = "f1tv_radio_patch";
     private static final String KEY_ENABLED = "enabled";
     private static final String KEY_ADJUST_MS = "adjust_ms";
+    private static final String KEY_ACOUSTIC = "acoustic_sync";
+    private static final String KEY_AUTO_SYNC = "auto_sync";
+    private static final String KEY_MANUAL_DELAY_MS = "manual_delay_ms";
 
+    static final long STEP_MS = 250L;
     private static final long TICK_MS = 100L;
     private static final long LAG_WINDOW_MS = 1_500L;
     private static final long LAG_JUMP_MS = 600L;
     private static final long MUTE_AFTER_AUDIBLE_MS = 500L;
     private static final long ENGINE_IDLE_RELEASE_MS = 3 * 60_000L;
-    private static final long OVERLAY_TIMEOUT_MS = 8_000L;
-    private static final long OVERLAY_PASSIVE_MS = 5_000L;
-    private static final long FINE_STEP_MS = 250L;
-    private static final long COARSE_STEP_MS = 1_000L;
+    private static final long MAX_DELAY_MS = 145_000L;
     private static final int MAX_CONSECUTIVE_FAILURES = 50;
+    private static final long ACOUSTIC_INTERVAL_MS = 5_000L;
+    // Correlation strength / peak-vs-runner-up needed before trusting an acoustic estimate.
+    // Logged with every estimate so these can be tuned on real sessions.
+    private static final double ACOUSTIC_MIN_SCORE = 0.12;
+    private static final double ACOUSTIC_MIN_PEAK_RATIO = 1.3;
+    // Two consecutive estimates must agree this closely before the adjustment is changed
+    private static final long ACOUSTIC_AGREEMENT_MS = 250L;
+    // Smaller offsets are within what the measurement itself can resolve
+    private static final long ACOUSTIC_DEADBAND_MS = 150L;
+    // After a delay change the playout converges over ~3 s; only measure audio from after that
+    private static final long ALIGNMENT_SETTLE_MS = 4_000L;
+    private static final long TARGET_JUMP_MS = 500L;
+    private static final ExecutorService ACOUSTIC_EXECUTOR = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "radio-acoustic-sync");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static RadioPatch current;
@@ -66,26 +81,37 @@ public final class RadioPatch {
         }
     };
 
+    /** What the on-screen UI shows. */
+    enum SyncState { OFF, NOT_LIVE, STARTING, BUFFERING, IN_SYNC, VIDEO_AHEAD, BUFFER_EXCEEDED, PAUSED, ERROR }
+
     private final WeakReference<TiledPlayer> playerRef;
     private final WeakReference<Activity> activityRef;
     private final SharedPreferences prefs;
     private final ArrayDeque<long[]> lagSamples = new ArrayDeque<>();
+    private final RadioUi ui;
     private boolean enabled;
+    private boolean autoSync;
     private long adjustMs;
+    private long manualDelayMs;
     private boolean wasVideoPlaying;
     private int lagAboveCount;
     private long videoLagMs = -1L;
-    private boolean lagFromWallclock;
+    private long targetDelayMs = -1L;
     private boolean f1MutedByUs;
     private boolean disabledByError;
     private int consecutiveFailures;
     private boolean live;
-    private boolean announcedStart;
+    private boolean radioCarrying;
     private boolean announcedSync;
-
-    private TextView overlay;
-    private boolean overlayInteractive;
-    private long overlayHideAtMs;
+    private boolean acoustic;
+    /** The user nudged the sync by hand this session; acoustic sync then leaves the adjustment alone. */
+    private boolean acousticSuspended;
+    private long lastAlignmentChangeAtMs;
+    private long lastTargetDelayMs = -1L;
+    private long nextAcousticAtMs;
+    private boolean acousticInFlight;
+    private AcousticCorrelator.Estimate pendingEstimate;
+    private long lastAcousticCheckAtMs;
 
     private final Runnable tick = this::tick;
 
@@ -94,7 +120,18 @@ public final class RadioPatch {
         activityRef = new WeakReference<>(activity);
         prefs = activity.getSharedPreferences(PREFS, Activity.MODE_PRIVATE);
         enabled = prefs.getBoolean(KEY_ENABLED, Config.DEFAULT_ENABLED);
+        autoSync = prefs.getBoolean(KEY_AUTO_SYNC, true);
         adjustMs = prefs.getLong(KEY_ADJUST_MS, Config.DEFAULT_ADJUST_MS);
+        manualDelayMs = prefs.getLong(KEY_MANUAL_DELAY_MS, Config.FALLBACK_DELAY_MS);
+        acoustic = prefs.getBoolean(KEY_ACOUSTIC, true);
+        ui = new RadioUi(activity, this);
+    }
+
+    /** Whether the F1 and radio audio should be fingerprinted right now (see {@link AudioTap}). */
+    static boolean isAcousticTapWanted() {
+        RadioPatch controller = current;
+        return controller != null && controller.enabled && controller.live && controller.autoSync
+                && controller.acoustic && !controller.disabledByError;
     }
 
     // ── Smali hook entry points ──────────────────────────────────────────────
@@ -108,7 +145,8 @@ public final class RadioPatch {
             MAIN.removeCallbacks(RELEASE_ENGINE);
             current = new RadioPatch((TiledPlayer) tiledPlayer, activity);
             MAIN.post(current.tick);
-            Log.i(TAG, "attached to TiledPlayer enabled=" + current.enabled + " adjustMs=" + current.adjustMs);
+            Log.i(TAG, "attached to TiledPlayer enabled=" + current.enabled + " autoSync=" + current.autoSync
+                    + " adjustMs=" + current.adjustMs + " acoustic=" + current.acoustic);
         } catch (Throwable t) {
             Log.e(TAG, "onPlayerCreated failed; radio disabled", t);
         }
@@ -119,7 +157,7 @@ public final class RadioPatch {
         try {
             RadioPatch controller = current;
             if (controller == null || controller.activityRef.get() != activity) return false;
-            return controller.handleKey(event);
+            return controller.ui.handleKey(event);
         } catch (Throwable t) {
             Log.e(TAG, "onKeyEvent failed", t);
             return false;
@@ -146,7 +184,7 @@ public final class RadioPatch {
         MAIN.removeCallbacks(tick);
         setF1Muted(false);
         if (engine != null) engine.setPlaying(false);
-        removeOverlay();
+        ui.dispose();
         if (current == this) current = null;
         // Keep the stream (and its delay buffer) alive briefly so switching sessions is instant.
         MAIN.removeCallbacks(RELEASE_ENGINE);
@@ -179,7 +217,11 @@ public final class RadioPatch {
                 if (engine != null) engine.setPlaying(false);
             }
         }
-        updateOverlay();
+        try {
+            ui.update();
+        } catch (Throwable t) {
+            Log.w(TAG, "radio UI update failed", t);
+        }
         if (current == this) MAIN.postDelayed(tick, TICK_MS);
     }
 
@@ -192,6 +234,7 @@ public final class RadioPatch {
             if (engine != null) engine.setPlaying(false);
             setF1Muted(false);
             wasVideoPlaying = false;
+            radioCarrying = false;
             return;
         }
         boolean videoPlaying = player.isPlaying();
@@ -199,27 +242,33 @@ public final class RadioPatch {
             engine = new RadioEngine(Config.STREAM_URL);
             engine.start();
         }
-        if (!announcedStart) {
-            announcedStart = true;
-            showOverlay(false);
-        }
 
         if (videoPlaying && !wasVideoPlaying) lagSamples.clear();
         wasVideoPlaying = videoPlaying;
 
         long sample = sampleVideoLag(player);
         videoLagMs = sample < 0 ? -1L : smoothLag(sample);
-        engine.setTargetDelayMs(videoLagMs < 0 ? -1L : Math.max(0L, videoLagMs + adjustMs));
+        if (autoSync) {
+            targetDelayMs = videoLagMs < 0 ? -1L : clampDelay(videoLagMs + adjustMs);
+        } else {
+            targetDelayMs = manualDelayMs;
+        }
+        if (targetDelayMs >= 0 && (lastTargetDelayMs < 0 || Math.abs(targetDelayMs - lastTargetDelayMs) > TARGET_JUMP_MS)) {
+            markAlignmentChanged();
+        }
+        if (targetDelayMs >= 0) lastTargetDelayMs = targetDelayMs;
+        engine.setTargetDelayMs(targetDelayMs);
         engine.setPlaying(videoPlaying);
 
         long audibleSince = engine.getAudibleSinceMs();
-        boolean radioCarrying = audibleSince > 0 && SystemClock.elapsedRealtime() - audibleSince >= MUTE_AFTER_AUDIBLE_MS;
+        radioCarrying = audibleSince > 0 && SystemClock.elapsedRealtime() - audibleSince >= MUTE_AFTER_AUDIBLE_MS;
         if (radioCarrying) {
             setF1Muted(true);
             if (!announcedSync) {
                 announcedSync = true;
-                showOverlay(false);
+                ui.notify(RadioUi.Notice.IN_SYNC, null);
             }
+            if (videoPlaying) maybeRunAcousticEstimate();
         } else if (videoPlaying && audibleSince == 0) {
             // Radio can't cover this moment (buffering, outside buffer, stream down): F1 audio back.
             setF1Muted(false);
@@ -236,13 +285,11 @@ public final class RadioPatch {
         if (wallclock != null && wallclock.getIsSuccess() && wallclock.isWallclockTimeSourceBased()) {
             long frameEpochMs = wallclock.getCurrentPositionInMilliseconds();
             if (frameEpochMs > 1_000_000_000_000L) {
-                lagFromWallclock = true;
                 return System.currentTimeMillis() - frameEpochMs;
             }
         }
 
         // No usable wall clock: fixed base delay plus however far the viewer is behind live.
-        lagFromWallclock = false;
         TimingReport timeshift = view.getCurrentTimingReport(TimingType.TIMESHIFT);
         long shiftMs = timeshift != null && timeshift.getIsSuccess() ? Math.abs(timeshift.getTimeShiftInMilliseconds()) : 0L;
         return Config.FALLBACK_DELAY_MS + shiftMs;
@@ -296,143 +343,154 @@ public final class RadioPatch {
         }
     }
 
-    // ── Remote control + overlay ─────────────────────────────────────────────
-
-    private boolean handleKey(KeyEvent event) {
-        int code = event.getKeyCode();
-        boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
-
-        if (!overlayInteractive) {
-            boolean opener = code == KeyEvent.KEYCODE_MENU
-                    || code == KeyEvent.KEYCODE_PROG_RED || code == KeyEvent.KEYCODE_PROG_GREEN
-                    || code == KeyEvent.KEYCODE_PROG_YELLOW || code == KeyEvent.KEYCODE_PROG_BLUE;
-            boolean longSelect = (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER)
-                    && down && (event.getFlags() & KeyEvent.FLAG_LONG_PRESS) != 0;
-            if ((opener && down && event.getRepeatCount() == 0) || longSelect) {
-                showOverlay(true);
-                return true;
-            }
-            return false;
-        }
-
-        // Overlay is open: it owns every key until closed.
-        if (!down) return true;
-        boolean firstPress = event.getRepeatCount() == 0;
-        switch (code) {
-            case KeyEvent.KEYCODE_DPAD_RIGHT: changeAdjust(FINE_STEP_MS); break;
-            case KeyEvent.KEYCODE_DPAD_LEFT: changeAdjust(-FINE_STEP_MS); break;
-            case KeyEvent.KEYCODE_DPAD_UP: changeAdjust(COARSE_STEP_MS); break;
-            case KeyEvent.KEYCODE_DPAD_DOWN: changeAdjust(-COARSE_STEP_MS); break;
-            case KeyEvent.KEYCODE_DPAD_CENTER:
-            case KeyEvent.KEYCODE_ENTER:
-            case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                if (firstPress) setEnabled(!enabled);
-                break;
-            case KeyEvent.KEYCODE_BACK:
-            case KeyEvent.KEYCODE_ESCAPE:
-            case KeyEvent.KEYCODE_MENU:
-            case KeyEvent.KEYCODE_PROG_RED:
-            case KeyEvent.KEYCODE_PROG_GREEN:
-            case KeyEvent.KEYCODE_PROG_YELLOW:
-            case KeyEvent.KEYCODE_PROG_BLUE:
-                if (firstPress) hideOverlay();
-                return true;
-            default:
-                break;
-        }
-        overlayHideAtMs = SystemClock.elapsedRealtime() + OVERLAY_TIMEOUT_MS;
-        updateOverlay();
-        return true;
+    private static long clampDelay(long delayMs) {
+        return Math.max(0L, Math.min(MAX_DELAY_MS, delayMs));
     }
 
-    private void changeAdjust(long deltaMs) {
-        adjustMs = Math.max(-120_000L, Math.min(120_000L, adjustMs + deltaMs));
-        prefs.edit().putLong(KEY_ADJUST_MS, adjustMs).apply();
+    // ── Actions (from the UI) ────────────────────────────────────────────────
+
+    /** Remote nudge: positive = more delay (radio later). Moves the adjustment, or the manual delay. */
+    void nudge(long deltaMs) {
+        if (autoSync && acoustic && !acousticSuspended) {
+            acousticSuspended = true;
+            Log.i(TAG, "acoustic sync suspended for this session (manual nudge)");
+        }
+        if (autoSync) {
+            setAdjust(adjustMs + deltaMs);
+        } else {
+            manualDelayMs = clampDelay(manualDelayMs + deltaMs);
+            prefs.edit().putLong(KEY_MANUAL_DELAY_MS, manualDelayMs).apply();
+            markAlignmentChanged();
+        }
     }
 
-    private void setEnabled(boolean value) {
+    void setAutoSync(boolean value) {
+        if (autoSync == value) return;
+        // Switching to manual keeps the current delay, so nothing jumps
+        if (!value && targetDelayMs >= 0) {
+            manualDelayMs = targetDelayMs;
+            prefs.edit().putLong(KEY_MANUAL_DELAY_MS, manualDelayMs).apply();
+        }
+        autoSync = value;
+        prefs.edit().putBoolean(KEY_AUTO_SYNC, value).apply();
+        markAlignmentChanged();
+        Log.i(TAG, "auto-sync " + (value ? "on" : "off"));
+    }
+
+    void setAcoustic(boolean value) {
+        acoustic = value;
+        if (value) acousticSuspended = false;
+        prefs.edit().putBoolean(KEY_ACOUSTIC, value).apply();
+        markAlignmentChanged();
+        Log.i(TAG, "acoustic sync " + (value ? "on" : "off"));
+    }
+
+    void resumeAcoustic() {
+        acousticSuspended = false;
+        markAlignmentChanged();
+        Log.i(TAG, "acoustic sync resumed");
+    }
+
+    void setEnabled(boolean value) {
         enabled = value;
         disabledByError = false;
+        announcedSync = false;
         prefs.edit().putBoolean(KEY_ENABLED, value).apply();
         Log.i(TAG, "radio " + (value ? "enabled" : "disabled"));
     }
 
-    private void showOverlay(boolean interactive) {
-        Activity activity = activityRef.get();
-        if (activity == null) return;
-        if (overlay == null) {
-            overlay = new TextView(activity);
-            overlay.setTextColor(Color.WHITE);
-            overlay.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-            overlay.setBackgroundColor(0xCC101010);
-            int pad = dp(activity, 14);
-            overlay.setPadding(pad, pad, pad, pad);
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                    Gravity.TOP | Gravity.END);
-            lp.setMargins(0, dp(activity, 32), dp(activity, 48), 0);
-            ((ViewGroup) activity.getWindow().getDecorView()).addView(overlay, lp);
+    private void setAdjust(long value) {
+        adjustMs = Math.max(-120_000L, Math.min(120_000L, value));
+        prefs.edit().putLong(KEY_ADJUST_MS, adjustMs).apply();
+        markAlignmentChanged();
+    }
+
+    // ── State (for the UI) ───────────────────────────────────────────────────
+
+    boolean isEnabled() { return enabled; }
+    boolean isLive() { return live; }
+    boolean isAutoSync() { return autoSync; }
+    boolean isAcoustic() { return acoustic; }
+    boolean isAcousticSuspended() { return acousticSuspended; }
+    long getAdjustMs() { return adjustMs; }
+    long getVideoLagMs() { return videoLagMs; }
+    long getTargetDelayMs() { return targetDelayMs; }
+    /** Elapsed-realtime of the last acoustic check that found the radio in sync, 0 if none yet. */
+    long getLastAcousticCheckAtMs() { return lastAcousticCheckAtMs; }
+
+    long getBufferingRemainingMs() {
+        RadioEngine e = engine;
+        return e == null ? -1L : e.getBufferingRemainingMs();
+    }
+
+    SyncState getSyncState() {
+        if (disabledByError) return SyncState.ERROR;
+        if (!enabled) return SyncState.OFF;
+        if (!live) return SyncState.NOT_LIVE;
+        RadioEngine e = engine;
+        if (e == null) return SyncState.STARTING;
+        switch (e.getState()) {
+            case CONNECTING: return SyncState.STARTING;
+            case BUFFERING: return SyncState.BUFFERING;
+            case PLAYING: return radioCarrying ? SyncState.IN_SYNC : SyncState.BUFFERING;
+            case VIDEO_AHEAD: return SyncState.VIDEO_AHEAD;
+            case BUFFER_EXCEEDED: return SyncState.BUFFER_EXCEEDED;
+            case PAUSED: return SyncState.PAUSED;
+            case ERROR: return SyncState.ERROR;
+            default: return SyncState.STARTING;
         }
-        overlayInteractive = overlayInteractive || interactive;
-        overlayHideAtMs = SystemClock.elapsedRealtime() + (interactive ? OVERLAY_TIMEOUT_MS : OVERLAY_PASSIVE_MS);
-        overlay.bringToFront();
-        updateOverlay();
     }
 
-    private void hideOverlay() {
-        removeOverlay();
+    // ── Acoustic sync ────────────────────────────────────────────────────────
+
+    private void markAlignmentChanged() {
+        lastAlignmentChangeAtMs = SystemClock.elapsedRealtime() + ALIGNMENT_SETTLE_MS;
+        pendingEstimate = null;
     }
 
-    private void removeOverlay() {
-        if (overlay != null && overlay.getParent() instanceof ViewGroup) {
-            ((ViewGroup) overlay.getParent()).removeView(overlay);
-        }
-        overlay = null;
-        overlayInteractive = false;
+    private void maybeRunAcousticEstimate() {
+        long now = SystemClock.elapsedRealtime();
+        if (!autoSync || !acoustic || acousticSuspended || acousticInFlight || now < nextAcousticAtMs) return;
+        nextAcousticAtMs = now + ACOUSTIC_INTERVAL_MS;
+        final double notBeforeMs = lastAlignmentChangeAtMs;
+        acousticInFlight = true;
+        ACOUSTIC_EXECUTOR.execute(() -> {
+            AcousticCorrelator.Estimate estimate = null;
+            try {
+                estimate = AcousticCorrelator.estimate(AudioTap.F1_AUDIO, RadioEngine.RADIO_AUDIO, notBeforeMs);
+            } catch (Throwable t) {
+                Log.w(TAG, "acoustic estimate failed", t);
+            }
+            final AcousticCorrelator.Estimate result = estimate;
+            MAIN.post(() -> {
+                acousticInFlight = false;
+                if (result != null && current == this) onAcousticEstimate(result, notBeforeMs);
+            });
+        });
     }
 
-    private void updateOverlay() {
-        if (overlay == null) return;
-        if (SystemClock.elapsedRealtime() > overlayHideAtMs) {
-            removeOverlay();
+    private void onAcousticEstimate(AcousticCorrelator.Estimate estimate, double notBeforeMs) {
+        // The alignment changed while this was computing: it describes audio that no longer applies
+        if (lastAlignmentChangeAtMs != notBeforeMs || acousticSuspended || !autoSync) return;
+        boolean confident = estimate.score >= ACOUSTIC_MIN_SCORE && estimate.peakRatio >= ACOUSTIC_MIN_PEAK_RATIO;
+        Log.i(TAG, String.format(Locale.ROOT, "acoustic estimate lagMs=%d score=%.3f peakRatio=%.2f confident=%b",
+                estimate.lagMs, estimate.score, estimate.peakRatio, confident));
+        if (!confident) return;
+        if (Math.abs(estimate.lagMs) < ACOUSTIC_DEADBAND_MS) {
+            pendingEstimate = null;
+            lastAcousticCheckAtMs = SystemClock.elapsedRealtime();
             return;
         }
-        StringBuilder text = new StringBuilder();
-        text.append("Custom radio: ").append(enabled ? "ON" : "OFF");
-        if (overlayInteractive) text.append("   (OK = toggle)");
-        text.append('\n').append(String.format(Locale.US, "Sync adjust: %+.2f s", adjustMs / 1000.0));
-        if (overlayInteractive) text.append("   ◀ ▶ 0.25 s   ▼ ▲ 1 s");
-        if (enabled) {
-            text.append('\n').append(statusLine());
-            if (videoLagMs >= 0) {
-                text.append('\n').append(String.format(Locale.US, "Video lag %.1f s (%s) → radio delay %.1f s",
-                        videoLagMs / 1000.0, lagFromWallclock ? "wall clock" : "fallback",
-                        Math.max(0L, videoLagMs + adjustMs) / 1000.0));
-            }
+        AcousticCorrelator.Estimate previous = pendingEstimate;
+        if (previous == null || Math.abs(previous.lagMs - estimate.lagMs) > ACOUSTIC_AGREEMENT_MS) {
+            pendingEstimate = estimate;
+            return;
         }
-        if (overlayInteractive) text.append("\n◀ radio earlier · later ▶   BACK = close");
-        overlay.setText(text);
-    }
-
-    private String statusLine() {
-        if (disabledByError) return "Status: stopped after an error (see logcat F1Radio)";
-        if (!live) return "Status: replay/VOD — using F1 audio";
-        RadioEngine e = engine;
-        if (e == null) return "Status: starting";
-        String error = e.getLastError();
-        switch (e.getState()) {
-            case CONNECTING: return "Status: connecting" + (error != null ? " (" + error + ")" : "");
-            case BUFFERING: return String.format(Locale.US, "Status: buffering, in sync in ~%d s", e.getBufferingRemainingMs() / 1000);
-            case PLAYING: return "Status: in sync · " + e.getFormatDescription();
-            case VIDEO_AHEAD: return "Status: video is closer to live than the radio — lower the adjust";
-            case BUFFER_EXCEEDED: return "Status: too far behind live for the radio buffer — F1 audio";
-            case PAUSED: return "Status: paused";
-            case ERROR: return "Status: error " + error;
-            default: return "Status: " + e.getState();
-        }
-    }
-
-    private static int dp(Activity activity, int value) {
-        return Math.round(value * activity.getResources().getDisplayMetrics().density);
+        long lagMs = (previous.lagMs + estimate.lagMs) / 2;
+        // Radio heard lagMs after the F1 audio: take that much off its delay
+        setAdjust(adjustMs - lagMs);
+        lastAcousticCheckAtMs = SystemClock.elapsedRealtime();
+        Log.i(TAG, "acoustic correction lagMs=" + lagMs + " adjustMs=" + adjustMs);
+        if (Math.abs(lagMs) >= 500L) ui.notify(RadioUi.Notice.ACOUSTIC_ADJUSTED, -lagMs);
     }
 }

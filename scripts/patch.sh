@@ -834,6 +834,77 @@ if n != 1:
     print("ERROR: TiledPlayerActivityTv.dispatchKeyEvent not found", file=sys.stderr); sys.exit(1)
 path.write_text(content)
 print("  Hooked TiledPlayerActivityTv.dispatchKeyEvent")
+
+# Hook 3: ClearVR's audio output, so the F1 audio can be matched against the radio's circuit
+# sound (acoustic sync). Optional: without it the radio still syncs on the video clock.
+# Found by signature across all of ClearVR (com/tiledmedia), so it survives class renames
+# between F1TV versions. Each AudioTrack.write overload maps to the AudioTap method with the
+# same parameters plus the track first.
+WRITE_OVERLOADS = {
+    'Ljava/nio/ByteBuffer;II': 4,
+    '[BII': 4,
+    '[SII': 4,
+    '[FIII': 5,
+}
+hooked_writes = 0
+for smali in root.glob('smali*/com/tiledmedia/**/*.smali'):
+    text = smali.read_text()
+    if 'Landroid/media/AudioTrack;->write(' not in text:
+        continue
+    new_text = text
+    for params, count in WRITE_OVERLOADS.items():
+        regs = ', '.join([r'([vp]\d+)'] * count)
+        pattern = r'invoke-virtual \{' + regs + r'\}, Landroid/media/AudioTrack;->write\(' + re.escape(params) + r'\)I'
+        replacement = ('invoke-static {' + ', '.join(f'\\{i + 1}' for i in range(count)) + '}, '
+                       'Lcom/f1tvpatch/radio/AudioTap;->write(Landroid/media/AudioTrack;' + params + ')I')
+        new_text, n = re.subn(pattern, replacement, new_text)
+        hooked_writes += n
+    if new_text != text:
+        smali.write_text(new_text)
+        print(f"  Hooked AudioTrack.write in {smali.relative_to(root)} (acoustic sync)")
+if hooked_writes == 0:
+    print("  WARNING: no ClearVR AudioTrack.write call found; acoustic sync unavailable")
+
+# Hook 4: radio (and update) options in F1TV's own settings screen. Optional.
+hits = list(root.glob('smali*/com/avs/f1/ui/settings/SettingsFragment$PrefFragment.smali'))
+if len(hits) == 1:
+    content = hits[0].read_text()
+    m = re.search(r'\.method public onCreatePreferences\(Landroid/os/Bundle;Ljava/lang/String;\)V.*?\.end method', content, re.DOTALL)
+    if m:
+        method = m.group(0)
+        hooked = method.replace('    return-void', '''    invoke-static {p0}, Lcom/f1tvpatch/radio/RadioSettings;->onCreatePreferences(Ljava/lang/Object;)V
+
+    return-void''')
+        hits[0].write_text(content.replace(method, hooked))
+        print("  Hooked SettingsFragment.PrefFragment.onCreatePreferences (radio settings)")
+    else:
+        print("  WARNING: onCreatePreferences not found; no radio settings screen")
+else:
+    print("  WARNING: SettingsFragment$PrefFragment not found; no radio settings screen")
+
+# Hook 5: in-app updater, started from the splash screen (only when an update repo is set).
+import os
+if os.environ.get('F1TV_UPDATE_REPO'):
+    hits = list(root.glob('smali*/com/avs/f1/ui/splash/SplashActivity.smali'))
+    if len(hits) == 1:
+        content = hits[0].read_text()
+        superCall = 'invoke-super {p0, p1}, Landroidx/fragment/app/FragmentActivity;->onCreate(Landroid/os/Bundle;)V'
+        if content.count(superCall) == 1:
+            content = content.replace(superCall, superCall + '''
+
+    invoke-static {p0}, Lcom/f1tvpatch/radio/Updater;->onLaunch(Landroid/app/Activity;)V''')
+            hits[0].write_text(content)
+            manifest = root / 'AndroidManifest.xml'
+            text = manifest.read_text()
+            permission = '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>'
+            if permission not in text:
+                text = text.replace('<uses-permission ', permission + '\n    <uses-permission ', 1)
+                manifest.write_text(text)
+            print("  Hooked SplashActivity.onCreate (in-app updater) + REQUEST_INSTALL_PACKAGES")
+        else:
+            print("  WARNING: SplashActivity.onCreate super call not found; no in-app updater")
+    else:
+        print("  WARNING: SplashActivity not found; no in-app updater")
 PYEOF
     ok "Custom radio hooks applied (dex is injected after rebuild)"
 else
