@@ -417,6 +417,11 @@ jobs:
       - name: Patch APKM
         run: |
           chmod +x scripts/patch.sh
+          # Release tag this build will be published under (same rule as "Create release"),
+          # baked in so the in-app updater can tell whether a newer release exists.
+          F1TV_RELEASE_TAG="v${{ needs.check.outputs.version_short }}"
+          if [[ "${{ github.ref_name }}" != "main" ]]; then F1TV_RELEASE_TAG="${F1TV_RELEASE_TAG}-${{ github.ref_name }}"; fi
+          export F1TV_RELEASE_TAG
           bash scripts/patch.sh "${{ steps.apkm.outputs.path }}" output/
         env:
           # Unlock the 2160p tier and render it with correct colours. All default
@@ -436,6 +441,10 @@ jobs:
           F1TV_CUSTOM_AUDIO_URL: ${{ vars.F1TV_CUSTOM_AUDIO_URL || secrets.F1TV_CUSTOM_AUDIO_URL }}
           F1TV_CUSTOM_AUDIO_ADJUST_MS: ${{ vars.F1TV_CUSTOM_AUDIO_ADJUST_MS }}
           F1TV_CUSTOM_AUDIO_FALLBACK_MS: ${{ vars.F1TV_CUSTOM_AUDIO_FALLBACK_MS }}
+          # In-app updater (radio builds): follows this repository's releases. Set the repo
+          # variable F1TV_SELF_UPDATE=0 to leave it out.
+          F1TV_UPDATE_REPO: ${{ vars.F1TV_SELF_UPDATE != '0' && github.repository || '' }}
+          F1TV_BUILD_RUN: ${{ github.run_id }}
           KEYSTORE_PATH: ${{ env.KEYSTORE_PATH || '' }}
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'android' }}
           KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS || 'f1tvpatch' }}
@@ -506,6 +515,8 @@ jobs:
           \`\`\`
 
           See the [README](https://github.com/${{ github.repository }}#installing-on-your-android-tv) for full setup instructions.
+
+          <sub>run:${{ github.run_id }}</sub>
           NOTES
           )" \
             output/f1tv-uhd-patched.apkm \
