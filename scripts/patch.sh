@@ -822,7 +822,9 @@ def known(rel):
 # Library code never holds F1TV's own screens; skipping it keeps the scans quick and unambiguous.
 LIB_PREFIXES = ('android/', 'androidx/', 'kotlin/', 'kotlinx/', 'com/google/', 'com/tiledmedia/',
                 'okhttp3/', 'okio/', 'retrofit2/', 'io/', 'org/', 'dagger/', 'javax/', 'com/squareup/',
-                'com/bitmovin/', 'com/f1tvpatch/')
+                'com/bitmovin/', 'com/f1tvpatch/', 'com/newrelic/', 'com/facebook/', 'com/distil/',
+                'com/appsflyer/', 'com/adobe/', 'com/amazon/', 'com/conviva/', 'com/datadog/',
+                'com/braze/', 'com/onetrust/', 'com/airbnb/', 'com/bumptech/', 'timber/')
 _app_smali = None
 def app_smali():
     global _app_smali
@@ -1147,6 +1149,42 @@ if auth_path is not None:
         warn("authentication state method has no .locals; no auto-login")
 else:
     warn("F1TV authentication class not found; no auto-login")
+
+# ── Hook 7: F1TV's device id (ANDROID_ID) -> DeviceId (pinned, so the account never sees a "new" ──
+# device after a key change or reinstall). Found wherever F1TV's own code reads Settings.Secure
+# "android_id"; in the Application class the pin is stored, elsewhere the pinned value is reused.
+ANDROID_ID_RE = re.compile(
+    r'(const-string(?:/jumbo)? (?P<key>[vp]\d+), "android_id"\n(?:(?!\.end method).)*?'
+    r'invoke-static \{[vp]\d+, (?P=key)\}, Landroid/provider/Settings\$Secure;->getString\(Landroid/content/ContentResolver;Ljava/lang/String;\)Ljava/lang/String;\n\s*'
+    r'move-result-object (?P<out>[vp]\d+)\n)', re.S)
+METHOD_RE = re.compile(r'^\.method [^\n]*\n.*?^\.end method', re.M | re.S)
+pinned_sites = 0
+for f in app_smali():
+    text = f.read_text()
+    if '"android_id"' not in text:
+        continue
+    is_app = 'Application;' in (super_of(text) or '')
+    new_text = text
+    for method in METHOD_RE.findall(text):
+        if '"android_id"' not in method:
+            continue
+        instance = ' static ' not in method.split('\n', 1)[0] + ' '
+        def repl(mm):
+            out = mm.group('out')
+            if is_app and instance:
+                call = f"invoke-static {{p0, {out}}}, Lcom/f1tvpatch/radio/DeviceId;->pin(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;"
+            else:
+                call = f"invoke-static {{{out}}}, Lcom/f1tvpatch/radio/DeviceId;->pinned(Ljava/lang/String;)Ljava/lang/String;"
+            return mm.group(1) + f"\n    {call}\n\n    move-result-object {out}\n"
+        hooked, n = ANDROID_ID_RE.subn(repl, method)
+        if n:
+            new_text = new_text.replace(method, hooked)
+            pinned_sites += n
+    if new_text != text:
+        f.write_text(new_text)
+        print(f"  Hooked ANDROID_ID read in {f.stem} (device id pin)")
+if pinned_sites == 0:
+    warn("F1TV's ANDROID_ID read not found; device id not pinned")
 
 # The adb entry point for the auto-login account (scripts/set_login.sh). Only the adb shell and the
 # system hold android.permission.DUMP, so no other app can send it.
@@ -1482,6 +1520,7 @@ if [[ -n "${F1TV_CUSTOM_AUDIO_URL:-}" ]]; then
     optional_marker 'RadioSettings;->onCreatePreferences' 'custom radio: settings screen'
     optional_marker 'Launch;->onLaunch' 'launch hook (diagnostic logs, in-app updater)'
     optional_marker 'AutoLogin;->onAuthState' 'auto-login'
+    optional_marker 'DeviceId;->pin' 'device id pin'
     if [[ -n "${F1TV_UPDATE_REPO:-}" ]]; then ok "  in-app updater follows ${F1TV_UPDATE_REPO}"; fi
 fi
 if [[ "${F1TV_DECODER_MAX_RES:-1}" != "0" ]]; then

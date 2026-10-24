@@ -89,6 +89,8 @@ public final class RadioSettings {
                     "No account stored. On the PC: scripts/set_login.sh (reads .env).")
                 : t("Logt opnieuw in als F1 TV je uitlogt: ", "Signs back in when F1 TV signs you out: ")
                     + LoginReceiver.mask(account[0]);
+        String deviceId = DeviceId.current(c);
+        if (deviceId != null) summary += t("\nF1-apparaat-id: ", "\nF1 device id: ") + deviceId;
         String last = AutoLogin.lastResult(c);
         if (last != null) summary += t("\nLaatste poging: ", "\nLast attempt: ") + last;
         category.addPreference(toggle(c, prefs, AutoLogin.KEY_ENABLED, true,

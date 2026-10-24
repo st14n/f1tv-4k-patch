@@ -329,9 +329,13 @@ shell and the system hold), is encrypted with an Android Keystore key on the TV,
 of the APK or a release. Attempts are rate-limited (one per 10 minutes). Settings → *Sign-in
 (patch)* shows the stored account and the last result; `scripts/set_login.sh --clear` removes it.
 
-The patched app is signed with your own key, and Android gives every signing key its own
-`ANDROID_ID`, which F1 TV uses as the device id: the patched app counts as a different device
-than the Play Store app. Keep the same keystore for every build so it stays one device.
+**One device, for good.** F1 TV registers itself as a device identified by `ANDROID_ID`, which
+Android derives from the app's signing key (and resets on a factory reset): a new keystore, a
+reinstall after a key change or the Play Store app each count as another device, and F1 refuses
+logins once *"the limited number of active associated devices"* is reached. The patch pins the
+first device id it sees and keeps using it. `set_login.sh` prints that id; add it to `.env` as
+`F1_DEVICE_ID=…` and every later install, with any key, comes back as the same device.
+Devices that already used up slots are released on F1's side (account page / F1 TV support).
 
 **Surviving F1TV updates.** Every hook is first looked up at its known class path and, if F1TV
 moved or renamed it, found again by structure: the player class by its constructor (an Activity)
