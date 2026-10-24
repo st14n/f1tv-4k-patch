@@ -20,8 +20,8 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * The patch's own settings screen (Grand Prix Radio, sign-in, updates), opened from the
- * "Grand Prix Radio" button the patch adds to F1TV's settings page. Built in code with framework
+ * The patch's own settings screen (custom radio, sign-in, updates), opened from the
+ * "Custom radio" button the patch adds to F1TV's settings page. Built in code with framework
  * widgets only, so it does not depend on F1TV's layouts or themes. D-pad: up/down to move,
  * OK to toggle or run, BACK to close. Changes apply from the next playback.
  */
@@ -121,7 +121,7 @@ public final class PatchSettingsActivity extends Activity {
         scroll.addView(list, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(scroll);
 
-        TextView heading = text("Grand Prix Radio", 30, TEXT, true);
+        TextView heading = text("Custom radio", 30, TEXT, true);
         heading.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
         list.addView(heading);
         View accent = new View(this);
@@ -135,7 +135,7 @@ public final class PatchSettingsActivity extends Activity {
                 14, MUTED, false));
 
         section(t("Radio", "Radio"));
-        toggle(t("Grand Prix Radio gebruiken", "Use Grand Prix Radio"), "enabled", Config.DEFAULT_ENABLED,
+        toggle(t("Custom radio gebruiken", "Use custom radio"), "enabled", Config.DEFAULT_ENABLED,
                 t("Vervangt het F1-commentaar bij live sessies.", "Replaces the F1 commentary in live sessions."));
         toggle(t("Automatisch synchroniseren", "Automatic sync"), "auto_sync", true,
                 t("Volgt hoe ver het beeld achter live loopt.", "Follows how far the picture is behind live."));

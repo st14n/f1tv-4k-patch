@@ -236,7 +236,7 @@ final class RadioUi {
 
         LinearLayout titleColumn = new LinearLayout(c);
         titleColumn.setOrientation(LinearLayout.VERTICAL);
-        TextView title = text(c, "Grand Prix Radio", 21, TEXT, true);
+        TextView title = text(c, "Custom radio", 21, TEXT, true);
         title.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
         titleColumn.addView(title);
         LinearLayout statusRow = new LinearLayout(c);
@@ -321,7 +321,7 @@ final class RadioUi {
                 : radio.isAcousticSuspended() ? t("gepauzeerd, zelf bijgesteld", "paused, adjusted by hand") : null);
         resumeAcoustic.setVisibility(auto && radio.isAcoustic() && radio.isAcousticSuspended() ? View.VISIBLE : View.GONE);
         radioRow.setText(radio.isEnabled() ? t("Terug naar F1-commentaar", "Back to F1 commentary")
-                : t("Grand Prix Radio gebruiken", "Use Grand Prix Radio"));
+                : t("Custom radio gebruiken", "Use custom radio"));
     }
 
     private LinearLayout buildPanel(Context c) {
@@ -331,7 +331,7 @@ final class RadioUi {
         p.setPadding(dp(c, 30), dp(c, 30), dp(c, 30), dp(c, 24));
 
         p.addView(text(c, t("AUDIO", "AUDIO"), 10, DIM, true));
-        TextView title = text(c, "Grand Prix Radio", 30, TEXT, true);
+        TextView title = text(c, "Custom radio", 30, TEXT, true);
         title.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
         p.addView(title);
         p.addView(text(c, t("Live · vervangt het F1-commentaar", "Live · replaces the F1 commentary"), 11, DIM, false));
@@ -465,7 +465,7 @@ final class RadioUi {
             }
             long seconds = (remaining + 999L) / 1000L;
             countdownCard.title.setText(String.format(Locale.getDefault(),
-                    t("Grand Prix Radio start over %d s", "Grand Prix Radio starts in %d s"), seconds));
+                    t("Custom radio start over %d s", "Custom radio starts in %d s"), seconds));
             countdownCard.icon.setCountdown(seconds, Math.max(seconds, countdownCard.icon.countdownTotal));
             countdownCard.hideAtMs = now + 1_000L;
         }

@@ -16,7 +16,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 
 /**
- * Adds a "Grand Prix Radio" button to F1TV's TV settings page (AccountSettingsFragment in 3.0.x),
+ * Adds a "Custom radio" button to F1TV's TV settings page (AccountSettingsFragment in 3.0.x),
  * built from F1TV's own button layout and background so it looks and focuses like its neighbours.
  * It opens {@link PatchSettingsActivity}.
  *
@@ -75,7 +75,7 @@ public final class TvSettingsEntry {
             String pkg = c.getPackageName();
             ViewGroup page = findPage(root, res, pkg);
             if (page == null) {
-                Log.w(TAG, "settings page layout not recognised; no Grand Prix Radio button");
+                Log.w(TAG, "settings page layout not recognised; no Custom radio button");
                 return;
             }
             View last = lastButton(page, res, pkg);
@@ -93,7 +93,7 @@ public final class TvSettingsEntry {
             if (layoutId != 0) {
                 View inner = LayoutInflater.from(c).inflate(layoutId, entry, false);
                 entry.addView(inner);
-                setText(inner, res, pkg, "title", "Grand Prix Radio");
+                setText(inner, res, pkg, "title", "Custom radio");
                 setText(inner, res, pkg, "description", Updater.t(
                         "Radio in plaats van het F1-commentaar, synchronisatie, automatisch inloggen en updates.",
                         "Radio instead of the F1 commentary, sync, automatic sign-in and updates."));
@@ -101,7 +101,7 @@ public final class TvSettingsEntry {
                 setIcon(inner, res, pkg);
             } else {
                 TextView label = new TextView(c);
-                label.setText("Grand Prix Radio");
+                label.setText("Custom radio");
                 label.setPadding(PatchSettingsActivity.dp(c, 16), PatchSettingsActivity.dp(c, 24),
                         PatchSettingsActivity.dp(c, 16), PatchSettingsActivity.dp(c, 24));
                 entry.addView(label);
@@ -111,9 +111,9 @@ public final class TvSettingsEntry {
             ViewGroup.LayoutParams params = chainedBelow(last, entry.getId(), page);
             page.addView(entry, params);
             keepFocusChain(page, entry, res, pkg);
-            Log.i(TAG, "Grand Prix Radio button added to F1TV settings");
+            Log.i(TAG, "Custom radio button added to F1TV settings");
         } catch (Throwable t) {
-            Log.w(TAG, "could not add the Grand Prix Radio settings button", t);
+            Log.w(TAG, "could not add the Custom radio settings button", t);
         }
     }
 
