@@ -113,6 +113,8 @@ public final class RadioPatch {
     private boolean acousticInFlight;
     private AcousticCorrelator.Estimate pendingEstimate;
     private long lastAcousticCheckAtMs;
+    private String lagSource = "none";
+    private long nextStatusLogAtMs;
 
     private final Runnable tick = this::tick;
 
@@ -251,6 +253,7 @@ public final class RadioPatch {
 
         long sample = sampleVideoLag(player);
         videoLagMs = sample < 0 ? -1L : smoothLag(sample);
+        logStatus(videoPlaying);
         if (autoSync) {
             targetDelayMs = videoLagMs < 0 ? -1L : clampDelay(videoLagMs + adjustMs);
         } else {
@@ -296,9 +299,11 @@ public final class RadioPatch {
         if (wallclock != null && wallclock.getIsSuccess() && wallclock.isWallclockTimeSourceBased()) {
             long frameEpochMs = wallclock.getCurrentPositionInMilliseconds();
             if (frameEpochMs > 1_000_000_000_000L) {
+                lagSource = "wallclock";
                 return System.currentTimeMillis() - frameEpochMs;
             }
         }
+        lagSource = "fallback";
 
         // No usable wall clock: fixed base delay plus however far the viewer is behind live.
         TimingReport timeshift = view.getCurrentTimingReport(TimingType.TIMESHIFT);
@@ -408,6 +413,27 @@ public final class RadioPatch {
         announcedSync = false;
         prefs.edit().putBoolean(KEY_ENABLED, value).apply();
         Log.i(TAG, "radio " + (value ? "enabled" : "disabled"));
+    }
+
+    /** Every 10 s while live: what the sync is based on, for tuning from the logs. */
+    private void logStatus(boolean videoPlaying) {
+        long now = SystemClock.elapsedRealtime();
+        if (now < nextStatusLogAtMs) return;
+        nextStatusLogAtMs = now + 10_000L;
+        Log.i(TAG, "sync status videoLagMs=" + videoLagMs + " (" + lagSource + ") adjustMs=" + adjustMs
+                + " targetMs=" + targetDelayMs + " autoSync=" + autoSync + " playing=" + videoPlaying
+                + " radioCarrying=" + radioCarrying + " f1Muted=" + f1MutedByUs + " state=" + getSyncState());
+    }
+
+    /** From adb (LoginReceiver, DUMP-protected): set the sync adjustment of the running session. */
+    static void setAdjustFromAdb(long value) {
+        MAIN.post(() -> {
+            RadioPatch controller = current;
+            if (controller != null) {
+                controller.setAdjust(value);
+                Log.i(TAG, "adjustMs set over adb: " + controller.adjustMs);
+            }
+        });
     }
 
     private void setAdjust(long value) {

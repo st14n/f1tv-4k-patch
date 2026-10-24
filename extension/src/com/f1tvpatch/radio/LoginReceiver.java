@@ -25,6 +25,14 @@ public final class LoginReceiver extends BroadcastReceiver {
                 setResultCode(1);
                 return;
             }
+            // Tuning: am broadcast ... --el adjust_ms <ms> sets the running session's sync adjustment
+            if (intent.hasExtra("adjust_ms")) {
+                long adjust = intent.getLongExtra("adjust_ms", 0L);
+                Updater.prefs(context).edit().putLong("adjust_ms", adjust).apply();
+                RadioPatch.setAdjustFromAdb(adjust);
+                setResultCode(1);
+                return;
+            }
             // Device id (F1_DEVICE_ID in .env): same registered device across reinstalls and keys
             String deviceId = intent.getStringExtra("device_id");
             if (deviceId != null && deviceId.matches("[A-Za-z0-9._-]{8,64}")
