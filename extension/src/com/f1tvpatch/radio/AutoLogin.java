@@ -39,14 +39,24 @@ public final class AutoLogin {
     private static WeakReference<Activity> resumed = new WeakReference<>(null);
     private static Context appContext;
     private static boolean attemptInFlight;
+    /** Signed in while the app was in the background: restart its launch flow once it is back. */
+    private static boolean relaunchWhenResumed;
 
     /** From {@link Launch}: remembers the app and which screen is in front. */
     static void init(Activity launcher) {
         if (appContext != null) return;
         appContext = launcher.getApplicationContext();
         launcher.getApplication().registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
-            @Override public void onActivityResumed(Activity a) { resumed = new WeakReference<>(a); }
-            @Override public void onActivityPaused(Activity a) { }
+            @Override public void onActivityResumed(Activity a) {
+                resumed = new WeakReference<>(a);
+                if (relaunchWhenResumed) {
+                    relaunchWhenResumed = false;
+                    MAIN.post(AutoLogin::relaunch);
+                }
+            }
+            @Override public void onActivityPaused(Activity a) {
+                if (resumed.get() == a) resumed = new WeakReference<>(null);
+            }
             @Override public void onActivityCreated(Activity a, Bundle b) { }
             @Override public void onActivityStarted(Activity a) { }
             @Override public void onActivityStopped(Activity a) { }
@@ -143,17 +153,24 @@ public final class AutoLogin {
         }
     }
 
-    /** Back through F1TV's own launch flow, which restores the new session and opens home. */
+    /**
+     * Back through F1TV's own launch flow, which restores the new session and opens home. Only while
+     * F1TV is in front: never pull it over another app the user switched to.
+     */
     private static void relaunch() {
         Context c = appContext;
         if (c == null) return;
+        Activity front = resumed.get();
+        if (front == null || front.isFinishing()) {
+            relaunchWhenResumed = true;
+            Log.i(TAG, "signed in while in the background; home loads when F1 TV is opened");
+            return;
+        }
         Intent launch = c.getPackageManager().getLeanbackLaunchIntentForPackage(c.getPackageName());
         if (launch == null) launch = c.getPackageManager().getLaunchIntentForPackage(c.getPackageName());
         if (launch == null) return;
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-        Activity front = resumed.get();
-        if (front != null && !front.isFinishing()) front.startActivity(launch);
-        else c.startActivity(launch);
+        front.startActivity(launch);
     }
 
     /** Settings: try right now (e.g. after storing an account while on the sign-in screen). */
