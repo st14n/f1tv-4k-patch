@@ -32,17 +32,16 @@ public final class Launch {
 
     /**
      * F1TV logs through Timber but plants no tree in release builds, so its own diagnostics (login,
-     * session recovery, playback) never reach logcat. Planting Timber's DebugTree shows them, tagged
-     * with the F1TV class name. Found by name; a missing Timber only means no extra logs.
+     * session recovery, playback) never reach logcat. This plants {@link SafeLogTree}, which scrubs
+     * passwords, tokens and keys first: F1TV logs full login requests. A missing Timber only means
+     * no extra logs.
      */
     static void enableF1Logs(Context context) {
         if (f1LogsPlanted) return;
         try {
-            Class<?> treeType = Class.forName("timber.log.Timber$Tree");
-            Object debugTree = Class.forName("timber.log.Timber$DebugTree").getConstructor().newInstance();
-            Class.forName("timber.log.Timber").getMethod("plant", treeType).invoke(null, debugTree);
+            timber.log.Timber.plant(new SafeLogTree());
             f1LogsPlanted = true;
-            Log.i(RadioEngine.TAG, "F1TV diagnostic logs on (Timber DebugTree planted)");
+            Log.i(RadioEngine.TAG, "F1TV diagnostic logs on (scrubbed)");
         } catch (Throwable t) {
             Log.w(RadioEngine.TAG, "could not enable F1TV logs", t);
         }
