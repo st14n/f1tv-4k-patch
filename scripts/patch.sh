@@ -1040,28 +1040,8 @@ for smali in root.glob('smali*/com/tiledmedia/**/*.smali'):
 if hooked_writes == 0:
     warn("no ClearVR AudioTrack.write call found; acoustic sync unavailable")
 
-# ── Hook 4: radio (and update) options in F1TV's own settings screen. Optional. ──
-# 3.0.x: SettingsFragment$PrefFragment. Otherwise: the one app class under a "settings" package
-# that builds a preference screen (onCreatePreferences).
-PREFS_RE = re.compile(r'^\.method public (?:final )?onCreatePreferences\(Landroid/os/Bundle;Ljava/lang/String;\)V\n.*?^\.end method', re.M | re.S)
-settings_path = known('com/avs/f1/ui/settings/SettingsFragment$PrefFragment.smali')
-if settings_path is None or not PREFS_RE.search(settings_path.read_text()):
-    found = [f for f in app_smali() if 'settings' in f.as_posix().lower() and PREFS_RE.search(f.read_text())]
-    if len(found) > 1:
-        found = [f for f in found if 'settings' in f.stem.lower()] or found
-    settings_path = found[0] if len(found) == 1 else None
-    if settings_path is not None:
-        print(f"  Settings screen found by structure: {settings_path.relative_to(root)}")
-if settings_path is not None:
-    content = settings_path.read_text()
-    method = PREFS_RE.search(content).group(0)
-    hooked = method.replace('    return-void', '''    invoke-static {p0}, Lcom/f1tvpatch/radio/RadioSettings;->onCreatePreferences(Ljava/lang/Object;)V
-
-    return-void''')
-    settings_path.write_text(content.replace(method, hooked))
-    print(f"  Hooked {settings_path.stem}.onCreatePreferences (radio settings)")
-else:
-    warn("F1TV settings screen not found; radio settings only in the player panel")
+# (Settings: no hook. The extension adds a "Grand Prix Radio" button to F1TV's settings page by
+#  watching the layout for its button ids at runtime; see TvSettingsEntry.java.)
 
 # ── Hook 5: app launch -> Launch.onLaunch (diagnostic logs, in-app updater). Optional. ──
 # 3.0.x: SplashActivity. Otherwise: the launcher activity named in the manifest.
@@ -1196,6 +1176,13 @@ if 'com.f1tvpatch.radio.LoginReceiver' not in text and '</application>' in text:
                 '<intent-filter><action android:name="com.f1tvpatch.SET_LOGIN"/></intent-filter></receiver>')
     manifest_path.write_text(text.replace('</application>', receiver + '</application>', 1))
     print("  Added LoginReceiver (adb: scripts/set_login.sh)")
+text = manifest_path.read_text()
+if 'com.f1tvpatch.radio.PatchSettingsActivity' not in text and '</application>' in text:
+    activity = ('<activity android:name="com.f1tvpatch.radio.PatchSettingsActivity" android:exported="false" '
+                'android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen" '
+                'android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize"/>')
+    manifest_path.write_text(text.replace('</application>', activity + '</application>', 1))
+    print("  Added PatchSettingsActivity (Grand Prix Radio settings screen)")
 PYEOF
     ok "Custom radio hooks applied (dex is injected after rebuild)"
 else
@@ -1517,7 +1504,6 @@ if [[ -n "${F1TV_CUSTOM_AUDIO_URL:-}" ]]; then
     optional_marker() {   # <marker> <description>
         if grep -rqF -- "$1" "${DECOMPILED}"/smali*; then ok "  $2"; else warn "  $2: not applied (optional)"; fi
     }
-    optional_marker 'RadioSettings;->onCreatePreferences' 'custom radio: settings screen'
     optional_marker 'Launch;->onLaunch' 'launch hook (diagnostic logs, in-app updater)'
     optional_marker 'AutoLogin;->onAuthState' 'auto-login'
     optional_marker 'DeviceId;->pin' 'device id pin'
