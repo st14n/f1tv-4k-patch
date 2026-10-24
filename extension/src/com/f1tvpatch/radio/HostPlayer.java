@@ -1,0 +1,200 @@
+package com.f1tvpatch.radio;
+
+import android.util.Log;
+
+import com.tiledmedia.clearvrplayer.TiledmediaPlayer;
+import com.tiledmedia.clearvrview.TiledmediaView;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+/**
+ * F1TV's player object (TiledPlayer in 3.0.x), reached by reflection instead of compiled-in names.
+ *
+ * Only the ClearVR SDK types (com.tiledmedia.*) are known up front; F1TV's own class, its fields and
+ * its Kotlin accessors (access$getPlayer, access$getViewsHolder$p) are found by the types they
+ * return. A rename in an F1TV update then still finds them, and if one really is gone only that
+ * feature stops instead of the radio throwing NoSuchMethodError.
+ */
+final class HostPlayer {
+    private static final String TAG = RadioEngine.TAG;
+
+    private final Object player;
+    private final Class<?> type;
+
+    private Method liveMethod;
+    private Method playingMethod;
+    private boolean liveResolved;
+    private boolean playingResolved;
+
+    // ClearVR player: a static accessor, a field holding it, or a kotlin.Lazy around it
+    private Method clearVrAccessor;
+    private Field clearVrField;
+    private boolean clearVrResolved;
+
+    // Main video view: field -> (optional) holder method that returns the TiledmediaView
+    private Field viewField;
+    private Method viewMethod;
+
+    HostPlayer(Object player) {
+        this.player = player;
+        this.type = player.getClass();
+    }
+
+    /** Whether this session is live, or null when F1TV no longer has a recognisable live check. */
+    Boolean isLive() throws Exception {
+        if (!liveResolved) {
+            liveResolved = true;
+            liveMethod = findBooleanGetter("isLiveContent", "live");
+            Log.i(TAG, "host live check: " + describe(liveMethod));
+        }
+        return liveMethod == null ? null : (Boolean) liveMethod.invoke(player);
+    }
+
+    /** Whether the video is playing. Unknown method = assume playing. */
+    boolean isPlaying() throws Exception {
+        if (!playingResolved) {
+            playingResolved = true;
+            playingMethod = findBooleanGetter("isPlaying", "playing");
+            Log.i(TAG, "host playing check: " + describe(playingMethod));
+        }
+        return playingMethod == null || Boolean.TRUE.equals(playingMethod.invoke(player));
+    }
+
+    /** ClearVR's player, or null when it is not created (yet). Never forces a lazy one into existence. */
+    TiledmediaPlayer clearVrPlayer() throws Exception {
+        if (!clearVrResolved) {
+            clearVrResolved = true;
+            for (Method m : allMethods(type)) {
+                Class<?>[] params = m.getParameterTypes();
+                if (Modifier.isStatic(m.getModifiers()) && params.length == 1 && params[0].isAssignableFrom(type)
+                        && TiledmediaPlayer.class.isAssignableFrom(m.getReturnType())) {
+                    m.setAccessible(true);
+                    clearVrAccessor = m;
+                    break;
+                }
+            }
+            if (clearVrAccessor == null) {
+                for (Field f : allFields(type)) {
+                    if (TiledmediaPlayer.class.isAssignableFrom(f.getType()) || isKotlinLazy(f.getType())) {
+                        f.setAccessible(true);
+                        if (TiledmediaPlayer.class.isAssignableFrom(f.getType())) { clearVrField = f; break; }
+                        if (clearVrField == null) clearVrField = f;
+                    }
+                }
+            }
+            Log.i(TAG, "host ClearVR player: " + describe(clearVrAccessor != null ? clearVrAccessor : clearVrField));
+        }
+        if (clearVrAccessor != null) {
+            Object value = clearVrAccessor.invoke(null, player);
+            return value instanceof TiledmediaPlayer ? (TiledmediaPlayer) value : null;
+        }
+        if (clearVrField != null) {
+            Object value = clearVrField.get(player);
+            if (value != null && isKotlinLazy(value.getClass())) {
+                if (!Boolean.TRUE.equals(value.getClass().getMethod("isInitialized").invoke(value))) return null;
+                value = value.getClass().getMethod("getValue").invoke(value);
+            }
+            return value instanceof TiledmediaPlayer ? (TiledmediaPlayer) value : null;
+        }
+        return null;
+    }
+
+    /** The ClearVR view showing the main feed, or null if there is none right now. */
+    TiledmediaView mainView() throws Exception {
+        if (viewField != null) {
+            TiledmediaView view = viewVia(viewField, viewMethod);
+            if (view != null) return view;
+        }
+        // (Re)discover: the holder may be set only once content loads
+        for (Field f : allFields(type)) {
+            if (f.getType().isPrimitive() || f.getType().getName().startsWith("java.")) continue;
+            f.setAccessible(true);
+            if (TiledmediaView.class.isAssignableFrom(f.getType())) {
+                TiledmediaView view = viewVia(f, null);
+                if (view != null) return remember(f, null, view);
+                continue;
+            }
+            Object holder = f.get(player);
+            if (holder == null) continue;
+            Method best = null;
+            for (Method m : holder.getClass().getMethods()) {
+                if (m.getParameterTypes().length != 0 || !TiledmediaView.class.isAssignableFrom(m.getReturnType())) continue;
+                // Several views (multi-feed): prefer the main one
+                if (best == null || m.getName().toLowerCase(Locale.ROOT).contains("main")) best = m;
+            }
+            if (best != null) {
+                TiledmediaView view = viewVia(f, best);
+                if (view != null) return remember(f, best, view);
+            }
+        }
+        return null;
+    }
+
+    private TiledmediaView remember(Field f, Method m, TiledmediaView view) {
+        if (viewField != f || viewMethod != m) {
+            Log.i(TAG, "host main view: " + describe(f) + (m != null ? " -> " + m.getName() + "()" : ""));
+        }
+        viewField = f;
+        viewMethod = m;
+        return view;
+    }
+
+    private TiledmediaView viewVia(Field f, Method m) throws Exception {
+        Object value = f.get(player);
+        if (value != null && m != null) value = m.invoke(value);
+        return value instanceof TiledmediaView ? (TiledmediaView) value : null;
+    }
+
+    /** Exact name first, then a no-arg boolean whose name contains the hint. */
+    private Method findBooleanGetter(String name, String hint) {
+        Method fallback = null;
+        for (Method m : allMethods(type)) {
+            if (m.getParameterTypes().length != 0 || m.getReturnType() != boolean.class || Modifier.isStatic(m.getModifiers())) continue;
+            if (m.getName().equals(name)) {
+                m.setAccessible(true);
+                return m;
+            }
+            String lower = m.getName().toLowerCase(Locale.ROOT);
+            if (fallback == null && lower.startsWith("is") && lower.contains(hint)) fallback = m;
+        }
+        if (fallback != null) fallback.setAccessible(true);
+        return fallback;
+    }
+
+    private static boolean isKotlinLazy(Class<?> c) {
+        for (Class<?> k = c; k != null; k = k.getSuperclass()) {
+            if (k.getName().equals("kotlin.Lazy")) return true;
+            for (Class<?> i : k.getInterfaces()) if (i.getName().equals("kotlin.Lazy")) return true;
+        }
+        return false;
+    }
+
+    private static List<Method> allMethods(Class<?> c) {
+        List<Method> out = new ArrayList<>();
+        for (Class<?> k = c; k != null && k != Object.class; k = k.getSuperclass()) {
+            for (Method m : k.getDeclaredMethods()) out.add(m);
+        }
+        return out;
+    }
+
+    private static List<Field> allFields(Class<?> c) {
+        List<Field> out = new ArrayList<>();
+        for (Class<?> k = c; k != null && k != Object.class; k = k.getSuperclass()) {
+            for (Field f : k.getDeclaredFields()) {
+                if (!Modifier.isStatic(f.getModifiers())) out.add(f);
+            }
+        }
+        return out;
+    }
+
+    private static String describe(Object member) {
+        if (member instanceof Method) return ((Method) member).getDeclaringClass().getSimpleName() + "." + ((Method) member).getName() + "()";
+        if (member instanceof Field) return ((Field) member).getDeclaringClass().getSimpleName() + "." + ((Field) member).getName();
+        return "not found (assumed)";
+    }
+}

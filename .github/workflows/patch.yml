@@ -36,6 +36,9 @@ jobs:
       source: ${{ steps.version.outputs.source }}
       apkmirror_release_url: ${{ steps.apkmirror.outputs.release_url }}
       apkmirror_variant_url: ${{ steps.apkmirror.outputs.variant_url }}
+      apkmirror_version_short: ${{ steps.apkmirror.outputs.version_short }}
+      apkpure_version: ${{ steps.apkpure.outputs.version }}
+      apkpure_version_short: ${{ steps.apkpure.outputs.version_short }}
       should_build: ${{ steps.decide.outputs.should_build }}
     steps:
       - uses: actions/checkout@v5
@@ -60,8 +63,8 @@ jobs:
           echo "Listing available versions from APKPure..."
           apkeep -l -a com.formulaone.production -d apk-pure 2>&1 | tee /tmp/apkeep_versions.txt
 
-          # Find the latest -tv version (last match = most recent)
-          TV_VERSION=$(grep -oP '[\d.]+-\S*-tv' /tmp/apkeep_versions.txt | tail -1)
+          # Highest -tv version by number (the list order is not guaranteed)
+          TV_VERSION=$(grep -oP '(?<![\w.])\d+(?:\.\d+)+-[^\s,|]*?-tv\b' /tmp/apkeep_versions.txt | sort -u -V | tail -1)
           if [[ -z "${TV_VERSION}" ]]; then
             echo "::warning::No TV variant found in APKPure version list"
             echo "version=" >> "$GITHUB_OUTPUT"
@@ -84,6 +87,8 @@ jobs:
         run: python scripts/check_version.py
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
+          # Optional repo variable: space-separated RSS feed URLs replacing the built-in list
+          APKMIRROR_FEED_URLS: ${{ vars.APKMIRROR_FEED_URLS }}
 
       - name: Resolve newest version
         id: version
@@ -347,37 +352,8 @@ jobs:
         id: download_apkpure
         run: |
           echo "Google Play unavailable, falling back to APKPure..."
-          mkdir -p download
-          TV_VERSION="${{ needs.check.outputs.version }}"
-          echo "Downloading F1TV TV version: ${TV_VERSION}"
-          apkeep -a "com.formulaone.production@${TV_VERSION}" -d apk-pure download/
-
-          # Find the downloaded file
-          echo "Download directory contents:"
-          ls -la download/
-          DOWNLOADED=$(find download/ -maxdepth 1 -name 'com.formulaone.production*' -print -quit)
-          if [[ -z "${DOWNLOADED}" ]]; then
-            echo "::error::APKPure download failed"
-            exit 1
-          fi
-          echo "Downloaded: ${DOWNLOADED}"
-
-          # XAPK is a zip of split APKs (same as APKM)
-          if [[ "${DOWNLOADED}" == *.xapk ]]; then
-            mv "${DOWNLOADED}" "${DOWNLOADED%.xapk}.apkm"
-            DOWNLOADED="${DOWNLOADED%.xapk}.apkm"
-          fi
-
-          # Single APK: wrap it into an APKM bundle so patch.sh can handle it
-          if [[ "${DOWNLOADED}" == *.apk ]]; then
-            echo "Single APK detected, wrapping as APKM bundle..."
-            mkdir -p download/bundle
-            cp "${DOWNLOADED}" download/bundle/base.apk
-            (cd download/bundle && zip -q ../f1tv-apkpure.apkm base.apk)
-            DOWNLOADED="download/f1tv-apkpure.apkm"
-          fi
-
-          echo "apkm_path=${DOWNLOADED}" >> "$GITHUB_OUTPUT"
+          APKM_PATH=$(bash scripts/download_apkpure.sh "${{ needs.check.outputs.version }}" download)
+          echo "apkm_path=${APKM_PATH}" >> "$GITHUB_OUTPUT"
           echo "source=apkpure" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
@@ -387,9 +363,12 @@ jobs:
         id: rss
         run: python scripts/check_version.py
         continue-on-error: true
+        env:
+          APKMIRROR_FEED_URLS: ${{ vars.APKMIRROR_FEED_URLS }}
 
+      # Only when APKMirror's latest IS the version being built (APKPure may be ahead)
       - name: Use APKMirror URLs from version check
-        if: ${{ needs.check.outputs.apkmirror_release_url != '' }}
+        if: ${{ needs.check.outputs.apkmirror_release_url != '' && needs.check.outputs.apkmirror_version_short == needs.check.outputs.version_short }}
         id: rss_reuse
         run: |
           echo "release_url=${{ needs.check.outputs.apkmirror_release_url }}" >> "$GITHUB_OUTPUT"
@@ -409,6 +388,17 @@ jobs:
             -o download)
           echo "apkm_path=${APKM_PATH}" >> "$GITHUB_OUTPUT"
           echo "source=apkmirror" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      # APKMirror was the source but its download failed (Cloudflare, page layout change):
+      # APKPure is a safety net when it lists the very same version.
+      - name: Download from APKPure (APKMirror fallback)
+        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && steps.download_apkpure.outcome != 'success' && steps.download_auto.outcome != 'success' && needs.check.outputs.apkpure_version_short != '' && needs.check.outputs.apkpure_version_short == needs.check.outputs.version_short }}
+        id: download_apkpure_fallback
+        run: |
+          APKM_PATH=$(bash scripts/download_apkpure.sh "${{ needs.check.outputs.apkpure_version }}" download_fallback)
+          echo "apkm_path=${APKM_PATH}" >> "$GITHUB_OUTPUT"
+          echo "source=apkpure" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
       - name: Upload download debug screenshots
@@ -443,6 +433,9 @@ jobs:
           elif [[ -n "${{ steps.download_auto.outputs.apkm_path }}" ]]; then
             echo "path=${{ steps.download_auto.outputs.apkm_path }}" >> "$GITHUB_OUTPUT"
             echo "source=${{ steps.download_auto.outputs.source }}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "${{ steps.download_apkpure_fallback.outputs.apkm_path }}" ]]; then
+            echo "path=${{ steps.download_apkpure_fallback.outputs.apkm_path }}" >> "$GITHUB_OUTPUT"
+            echo "source=${{ steps.download_apkpure_fallback.outputs.source }}" >> "$GITHUB_OUTPUT"
           else
             echo "::error::All download methods failed (Google Play + APKPure + APKMirror)."
             echo "::error::Trigger the workflow manually with a direct APKM URL."
@@ -486,8 +479,9 @@ jobs:
           F1TV_CUSTOM_AUDIO_ADJUST_MS: ${{ vars.F1TV_CUSTOM_AUDIO_ADJUST_MS }}
           F1TV_CUSTOM_AUDIO_FALLBACK_MS: ${{ vars.F1TV_CUSTOM_AUDIO_FALLBACK_MS }}
           # In-app updater (radio builds): follows this repository's releases. Set the repo
-          # variable F1TV_SELF_UPDATE=0 to leave it out.
-          F1TV_UPDATE_REPO: ${{ vars.F1TV_SELF_UPDATE != '0' && github.repository || '' }}
+          # variable F1TV_SELF_UPDATE=0 to leave it out. (An unset variable is null, and
+          # null != '0' compares as numbers, 0 != 0 -> false; hence the '1' default.)
+          F1TV_UPDATE_REPO: ${{ (vars.F1TV_SELF_UPDATE || '1') != '0' && github.repository || '' }}
           F1TV_BUILD_RUN: ${{ github.run_id }}
           KEYSTORE_PATH: ${{ env.KEYSTORE_PATH || '' }}
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'android' }}
