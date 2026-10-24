@@ -54,11 +54,18 @@ public final class RadioPatch {
     private static final int MAX_CONSECUTIVE_FAILURES = 50;
     private static final long ACOUSTIC_INTERVAL_MS = 5_000L;
     // Correlation strength / peak-vs-runner-up needed before trusting an acoustic estimate.
-    // Logged with every estimate so these can be tuned on real sessions.
-    private static final double ACOUSTIC_MIN_SCORE = 0.12;
-    private static final double ACOUSTIC_MIN_PEAK_RATIO = 1.3;
-    // Two consecutive estimates must agree this closely before the adjustment is changed
+    // Real matches on live sessions score 0.27-0.52 with a peak ratio of 2-7; chance matches on
+    // commentary-only stretches reached 0.13 / 1.34 and moved the radio 10 s off. Logged with every
+    // estimate so these can be tuned further.
+    private static final double ACOUSTIC_MIN_SCORE = 0.25;
+    private static final double ACOUSTIC_MIN_PEAK_RATIO = 2.0;
+    // Lags this close to the search limit are mostly edge artefacts of the correlation
+    private static final long ACOUSTIC_EDGE_MARGIN_MS = 1_500L;
+    // Two estimates must agree this closely before the adjustment is changed...
     private static final long ACOUSTIC_AGREEMENT_MS = 250L;
+    // ...and come from different audio: estimates run every 5 s over a 30 s window, so neighbours
+    // share most of their input and agree by construction. Require a full window between them.
+    private static final long ACOUSTIC_INDEPENDENT_MS = AcousticCorrelator.WINDOW_MS;
     // Smaller offsets are within what the measurement itself can resolve
     private static final long ACOUSTIC_DEADBAND_MS = 150L;
     // After a delay change the playout converges over ~3 s; only measure audio from after that
@@ -112,6 +119,7 @@ public final class RadioPatch {
     private long nextAcousticAtMs;
     private boolean acousticInFlight;
     private AcousticCorrelator.Estimate pendingEstimate;
+    private long pendingEstimateAtMs;
     private long lastAcousticCheckAtMs;
     private String lagSource = "none";
     private long nextStatusLogAtMs;
@@ -509,7 +517,8 @@ public final class RadioPatch {
     private void onAcousticEstimate(AcousticCorrelator.Estimate estimate, double notBeforeMs) {
         // The alignment changed while this was computing: it describes audio that no longer applies
         if (lastAlignmentChangeAtMs != notBeforeMs || acousticSuspended || !autoSync) return;
-        boolean confident = estimate.score >= ACOUSTIC_MIN_SCORE && estimate.peakRatio >= ACOUSTIC_MIN_PEAK_RATIO;
+        boolean confident = estimate.score >= ACOUSTIC_MIN_SCORE && estimate.peakRatio >= ACOUSTIC_MIN_PEAK_RATIO
+                && Math.abs(estimate.lagMs) <= AcousticCorrelator.MAX_LAG_MS - ACOUSTIC_EDGE_MARGIN_MS;
         Log.i(TAG, String.format(Locale.ROOT, "acoustic estimate lagMs=%d score=%.3f peakRatio=%.2f confident=%b",
                 estimate.lagMs, estimate.score, estimate.peakRatio, confident));
         if (!confident) return;
@@ -519,10 +528,15 @@ public final class RadioPatch {
             return;
         }
         AcousticCorrelator.Estimate previous = pendingEstimate;
+        long now = SystemClock.elapsedRealtime();
         if (previous == null || Math.abs(previous.lagMs - estimate.lagMs) > ACOUSTIC_AGREEMENT_MS) {
             pendingEstimate = estimate;
+            pendingEstimateAtMs = now;
             return;
         }
+        // Agrees, but measured on (largely) the same audio: wait for an independent confirmation
+        if (now - pendingEstimateAtMs < ACOUSTIC_INDEPENDENT_MS) return;
+        pendingEstimate = null;
         long lagMs = (previous.lagMs + estimate.lagMs) / 2;
         // Radio heard lagMs after the F1 audio: take that much off its delay
         setAdjust(adjustMs - lagMs);
