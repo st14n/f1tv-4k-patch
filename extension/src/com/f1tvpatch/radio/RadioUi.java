@@ -161,8 +161,11 @@ final class RadioUi {
         View focus = activity.getCurrentFocus();
         boolean controlsVisible = areF1ControlsVisible(activity);
         if (controlsVisible) barVisibleUntilMs = Math.max(barVisibleUntilMs, now + BAR_LINGER_MS);
-        boolean showBar = !isPanelOpen() && (radioMatters || isDescendant(focus, bar))
-                && (now < barVisibleUntilMs || isDescendant(focus, bar));
+        // Always on a timer, also while it has focus: each key in the bar extends it (handleKey), so
+        // it stays while used and disappears once F1's controls are gone and the remote is idle.
+        boolean focusInBar = isDescendant(focus, bar);
+        boolean showBar = !isPanelOpen() && (radioMatters || focusInBar) && now < barVisibleUntilMs;
+        if (!showBar && focusInBar) focus.clearFocus();
         bar.setVisibility(showBar ? View.VISIBLE : View.GONE);
         if (showBar) refreshBar(state);
 
