@@ -22,8 +22,8 @@ final class AcousticCorrelator {
         }
     }
 
-    private static final long WINDOW_MS = 30_000L;
-    private static final long MAX_LAG_MS = 10_000L;
+    static final long WINDOW_MS = 30_000L;
+    static final long MAX_LAG_MS = 10_000L;
     // Leave the newest audio out: part of it hasn't been heard yet
     private static final long END_MARGIN_MS = 2_000L;
     // Removes slow level changes so short events (cars passing, gear changes) dominate
