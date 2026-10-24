@@ -1061,7 +1061,7 @@ if settings_path is not None:
 else:
     warn("F1TV settings screen not found; radio settings only in the player panel")
 
-# ── Hook 5: in-app updater, started when the app launches (only when an update repo is set). ──
+# ── Hook 5: app launch -> Launch.onLaunch (diagnostic logs, in-app updater). Optional. ──
 # 3.0.x: SplashActivity. Otherwise: the launcher activity named in the manifest.
 ONCREATE_SUPER_RE = re.compile(r'invoke-super \{p0, ([pv]\d+)\}, (L[^;]+;)->onCreate\(Landroid/os/Bundle;\)V')
 
@@ -1082,7 +1082,7 @@ def launcher_activity_path():
                 return path
     return None
 
-if os.environ.get('F1TV_UPDATE_REPO'):
+if True:  # always: the launch hook also carries the diagnostic-log switch
     candidates = [p for p in (known('com/avs/f1/ui/splash/SplashActivity.smali'), launcher_activity_path()) if p is not None]
     hooked_updater = False
     for path in candidates:
@@ -1093,7 +1093,7 @@ if os.environ.get('F1TV_UPDATE_REPO'):
             continue
         method = ONCREATE_SUPER_RE.sub(lambda mm: mm.group(0) + '''
 
-    invoke-static {p0}, Lcom/f1tvpatch/radio/Updater;->onLaunch(Landroid/app/Activity;)V''', m.group(0), count=1)
+    invoke-static {p0}, Lcom/f1tvpatch/radio/Launch;->onLaunch(Landroid/app/Activity;)V''', m.group(0), count=1)
         path.write_text(content.replace(m.group(0), method))
         manifest_path = root / 'AndroidManifest.xml'
         text = manifest_path.read_text()
@@ -1105,7 +1105,7 @@ if os.environ.get('F1TV_UPDATE_REPO'):
         hooked_updater = True
         break
     if not hooked_updater:
-        warn("no launch activity onCreate to hook; no in-app updater in this build")
+        warn("no launch activity onCreate to hook; no in-app updater / diagnostic logs in this build")
 PYEOF
     ok "Custom radio hooks applied (dex is injected after rebuild)"
 else

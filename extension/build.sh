@@ -11,6 +11,7 @@ set -euo pipefail
 #   F1TV_CUSTOM_AUDIO_ENABLED     1/0 - radio on by default (default 1)
 #   F1TV_UPDATE_REPO              GitHub owner/repo whose releases the in-app updater follows (empty = off)
 #   F1TV_RELEASE_TAG / F1TV_BUILD_RUN  Release tag and CI run id of this build (set by CI)
+#   F1TV_DEBUG_LOGS               1 = F1TV's own (Timber) logs to logcat from launch (default 0)
 #   ANDROID_HOME / ANDROID_SDK_ROOT  Android SDK with a platform and build-tools installed
 
 OUT_DEX="$1"
@@ -42,6 +43,8 @@ for v in "${UPDATE_REPO}" "${RELEASE_TAG}" "${BUILD_RUN}"; do
     [[ "${v}" =~ ^[A-Za-z0-9._/-]*$ ]] || { echo "F1TV_UPDATE_REPO/RELEASE_TAG/BUILD_RUN may only use [A-Za-z0-9._/-]" >&2; exit 1; }
 done
 [[ "${F1TV_CUSTOM_AUDIO_ENABLED:-1}" == "0" ]] && ENABLED=false
+DEBUG_LOGS=false
+[[ "${F1TV_DEBUG_LOGS:-0}" == "1" ]] && DEBUG_LOGS=true
 
 # Git Bash on Windows: hand native tools Windows paths. No-op on Linux/macOS.
 native_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
@@ -67,6 +70,8 @@ final class Config {
     static final String UPDATE_REPO = "${UPDATE_REPO}";
     static final String RELEASE_TAG = "${RELEASE_TAG}";
     static final String BUILD_RUN = "${BUILD_RUN}";
+    // F1TV's own Timber logs to logcat from launch (also switchable in the settings screen)
+    static final boolean DEBUG_LOGS = ${DEBUG_LOGS};
 
     private Config() { }
 }
