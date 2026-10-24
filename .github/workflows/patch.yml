@@ -33,6 +33,9 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       version_short: ${{ steps.version.outputs.version_short }}
+      source: ${{ steps.version.outputs.source }}
+      apkmirror_release_url: ${{ steps.apkmirror.outputs.release_url }}
+      apkmirror_variant_url: ${{ steps.apkmirror.outputs.variant_url }}
       should_build: ${{ steps.decide.outputs.should_build }}
     steps:
       - uses: actions/checkout@v5
@@ -51,7 +54,8 @@ jobs:
           chmod +x /usr/local/bin/apkeep
 
       - name: Check latest TV version from APKPure
-        id: version
+        id: apkpure
+        continue-on-error: true
         run: |
           echo "Listing available versions from APKPure..."
           apkeep -l -a com.formulaone.production -d apk-pure 2>&1 | tee /tmp/apkeep_versions.txt
@@ -71,6 +75,38 @@ jobs:
           echo "version=${TV_VERSION}" >> "$GITHUB_OUTPUT"
           echo "version_short=${VERSION_SHORT}" >> "$GITHUB_OUTPUT"
           echo "Latest TV version: ${TV_VERSION} (short: ${VERSION_SHORT})"
+
+      # APKMirror usually lists a new version before APKPure, so check its RSS feed too and
+      # build as soon as EITHER source has a newer version.
+      - name: Check latest TV version from APKMirror
+        id: apkmirror
+        continue-on-error: true
+        run: python scripts/check_version.py
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+
+      - name: Resolve newest version
+        id: version
+        run: |
+          APKPURE='${{ steps.apkpure.outputs.version_short }}'
+          APKMIRROR='${{ steps.apkmirror.outputs.version_short }}'
+          python3 - "$APKPURE" "${{ steps.apkpure.outputs.version }}" "$APKMIRROR" "${{ steps.apkmirror.outputs.version }}" <<'PY' >> "$GITHUB_OUTPUT"
+          import sys
+          def key(v):
+              return [int(x) for x in v.split('.')] if v else []
+          ap_s, ap_full, am_s, am_full = sys.argv[1:5]
+          # Prefer APKMirror on a tie: its download path needs no Google auth
+          if key(am_s) >= key(ap_s) and am_s:
+              short, full, source = am_s, am_full, 'apkmirror'
+          elif ap_s:
+              short, full, source = ap_s, ap_full, 'apkpure'
+          else:
+              short, full, source = am_s, am_full, 'apkmirror'
+          print(f"version={full}")
+          print(f"version_short={short}")
+          print(f"source={source}")
+          print(f"chose {source} {short!r} (apkpure={ap_s!r} apkmirror={am_s!r})", file=sys.stderr)
+          PY
 
       - name: Check if release already exists
         id: existing
@@ -215,7 +251,7 @@ jobs:
 
       # ── Option A: Download from Google Play (arm64 via Shield profile) ──
       - name: Download from Google Play
-        if: ${{ !inputs.apkm_url && env.GOOGLE_EMAIL != '' }}
+        if: ${{ !inputs.apkm_url && env.GOOGLE_EMAIL != '' && needs.check.outputs.source != 'apkmirror' }}
         id: download_gplay
         run: |
           mkdir -p download
@@ -307,7 +343,7 @@ jobs:
 
       # ── Option B: Download from APKPure via apkeep ──
       - name: Download from APKPure
-        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' }}
+        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && needs.check.outputs.source != 'apkmirror' }}
         id: download_apkpure
         run: |
           echo "Google Play unavailable, falling back to APKPure..."
@@ -347,20 +383,29 @@ jobs:
 
       # ── Option C: Download from APKMirror via Playwright ──
       - name: Check latest version from RSS
-        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && steps.download_apkpure.outcome != 'success' }}
+        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && steps.download_apkpure.outcome != 'success' && needs.check.outputs.apkmirror_release_url == '' }}
         id: rss
         run: python scripts/check_version.py
         continue-on-error: true
 
+      - name: Use APKMirror URLs from version check
+        if: ${{ needs.check.outputs.apkmirror_release_url != '' }}
+        id: rss_reuse
+        run: |
+          echo "release_url=${{ needs.check.outputs.apkmirror_release_url }}" >> "$GITHUB_OUTPUT"
+          echo "variant_url=${{ needs.check.outputs.apkmirror_variant_url }}" >> "$GITHUB_OUTPUT"
+
       - name: Download APKM from APKMirror
-        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && steps.download_apkpure.outcome != 'success' && steps.rss.outputs.release_url != '' }}
+        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && steps.download_apkpure.outcome != 'success' && (steps.rss.outputs.release_url != '' || steps.rss_reuse.outputs.release_url != '') }}
         id: download_auto
         run: |
-          echo "APKPure download failed, trying APKMirror..."
+          echo "Downloading from APKMirror..."
           mkdir -p download
+          RELEASE_URL="${{ steps.rss_reuse.outputs.release_url || steps.rss.outputs.release_url }}"
+          VARIANT_URL="${{ steps.rss_reuse.outputs.variant_url || steps.rss.outputs.variant_url }}"
           APKM_PATH=$(python scripts/download_apkm.py \
-            "${{ steps.rss.outputs.release_url }}" \
-            --variant-url "${{ steps.rss.outputs.variant_url }}" \
+            "${RELEASE_URL}" \
+            --variant-url "${VARIANT_URL}" \
             -o download)
           echo "apkm_path=${APKM_PATH}" >> "$GITHUB_OUTPUT"
           echo "source=apkmirror" >> "$GITHUB_OUTPUT"
