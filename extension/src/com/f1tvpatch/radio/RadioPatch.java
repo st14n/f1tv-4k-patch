@@ -10,7 +10,6 @@ import android.os.SystemClock;
 import android.util.Log;
 import android.view.KeyEvent;
 
-import com.avs.f1.ui.tiledmediaplayer.TiledPlayer;
 import com.tiledmedia.clearvrenums.TimingType;
 import com.tiledmedia.clearvrparameters.TimingReport;
 import com.tiledmedia.clearvrplayer.TiledmediaPlayer;
@@ -33,7 +32,8 @@ import java.util.concurrent.Executors;
  * commentary to the F1 audio. With auto-sync off the radio plays at a fixed, manual delay.
  *
  * Every call into F1TV/ClearVR is wrapped: if an app update renames something, the radio turns
- * itself off instead of crashing the player.
+ * itself off instead of crashing the player. F1TV's own player is only reached through
+ * {@link HostPlayer}, which finds its members by type, so most renames do not even get that far.
  */
 public final class RadioPatch {
     private static final String TAG = RadioEngine.TAG;
@@ -84,7 +84,7 @@ public final class RadioPatch {
     /** What the on-screen UI shows. */
     enum SyncState { OFF, NOT_LIVE, STARTING, BUFFERING, IN_SYNC, VIDEO_AHEAD, BUFFER_EXCEEDED, PAUSED, ERROR }
 
-    private final WeakReference<TiledPlayer> playerRef;
+    private final WeakReference<HostPlayer> playerRef;
     private final WeakReference<Activity> activityRef;
     private final SharedPreferences prefs;
     private final ArrayDeque<long[]> lagSamples = new ArrayDeque<>();
@@ -115,7 +115,7 @@ public final class RadioPatch {
 
     private final Runnable tick = this::tick;
 
-    private RadioPatch(TiledPlayer player, Activity activity) {
+    private RadioPatch(HostPlayer player, Activity activity) {
         playerRef = new WeakReference<>(player);
         activityRef = new WeakReference<>(activity);
         prefs = activity.getSharedPreferences(PREFS, Activity.MODE_PRIVATE);
@@ -136,23 +136,23 @@ public final class RadioPatch {
 
     // ── Smali hook entry points ──────────────────────────────────────────────
 
-    /** Called at the end of {@code TiledPlayer.<init>}. */
-    public static void onPlayerCreated(Object tiledPlayer, Activity activity) {
+    /** Called at the end of F1TV's player constructor ({@code TiledPlayer.<init>} in 3.0.x). */
+    public static void onPlayerCreated(Object hostPlayer, Activity activity) {
         try {
-            if (Config.STREAM_URL.isEmpty() || !(tiledPlayer instanceof TiledPlayer)) return;
+            if (Config.STREAM_URL.isEmpty() || hostPlayer == null || activity == null) return;
             registerLifecycle(activity);
             if (current != null) current.detach();
             MAIN.removeCallbacks(RELEASE_ENGINE);
-            current = new RadioPatch((TiledPlayer) tiledPlayer, activity);
+            current = new RadioPatch(new HostPlayer(hostPlayer), activity);
             MAIN.post(current.tick);
-            Log.i(TAG, "attached to TiledPlayer enabled=" + current.enabled + " autoSync=" + current.autoSync
+            Log.i(TAG, "attached to " + hostPlayer.getClass().getName() + " enabled=" + current.enabled + " autoSync=" + current.autoSync
                     + " adjustMs=" + current.adjustMs + " acoustic=" + current.acoustic);
         } catch (Throwable t) {
             Log.e(TAG, "onPlayerCreated failed; radio disabled", t);
         }
     }
 
-    /** Called first thing in {@code TiledPlayerActivityTv.dispatchKeyEvent}; true = consumed. */
+    /** Called first thing in the player activity's {@code dispatchKeyEvent}; true = consumed. */
     public static boolean onKeyEvent(Activity activity, KeyEvent event) {
         try {
             RadioPatch controller = current;
@@ -197,7 +197,7 @@ public final class RadioPatch {
     private void tick() {
         if (current != this) return;
         try {
-            TiledPlayer player = playerRef.get();
+            HostPlayer player = playerRef.get();
             Activity activity = activityRef.get();
             if (player == null || activity == null || activity.isFinishing()) {
                 detach();
@@ -225,11 +225,13 @@ public final class RadioPatch {
         if (current == this) MAIN.postDelayed(tick, TICK_MS);
     }
 
-    private void step(TiledPlayer player) {
+    private void step(HostPlayer player) throws Exception {
         if (disabledByError) return;
         // isLiveContent() only reads a field; isPlaying() goes through F1TV's lazy ClearVR player
         // getter, so it must not be called before content is loaded or we'd create the player early.
-        live = player.isLiveContent();
+        Boolean hostLive = player.isLive();
+        // No live check in this F1TV version: live = the frame on screen is a recent wall-clock time
+        live = hostLive != null ? hostLive : isRecentWallclock(player);
         if (!enabled || !live) {
             if (engine != null) engine.setPlaying(false);
             setF1Muted(false);
@@ -275,10 +277,18 @@ public final class RadioPatch {
         }
     }
 
+    private static boolean isRecentWallclock(HostPlayer player) throws Exception {
+        TiledmediaView view = player.mainView();
+        if (view == null) return false;
+        TimingReport wallclock = view.getCurrentTimingReport(TimingType.WALLCLOCK_TIME);
+        if (wallclock == null || !wallclock.getIsSuccess() || !wallclock.isWallclockTimeSourceBased()) return false;
+        long lagMs = System.currentTimeMillis() - wallclock.getCurrentPositionInMilliseconds();
+        return lagMs >= 0 && lagMs <= MAX_DELAY_MS;
+    }
+
     /** Raw "how far behind real time is the picture" sample in ms, or -1 if unknown. */
-    private long sampleVideoLag(TiledPlayer player) {
-        TiledPlayer.ViewsHolder holder = TiledPlayer.access$getViewsHolder$p(player);
-        TiledmediaView view = holder == null ? null : holder.getMainView();
+    private long sampleVideoLag(HostPlayer player) throws Exception {
+        TiledmediaView view = player.mainView();
         if (view == null) return -1L;
 
         TimingReport wallclock = view.getCurrentTimingReport(TimingType.WALLCLOCK_TIME);
@@ -330,10 +340,10 @@ public final class RadioPatch {
 
     private void setF1Muted(boolean mute) {
         if (!mute && !f1MutedByUs) return;
-        TiledPlayer player = playerRef.get();
+        HostPlayer player = playerRef.get();
         if (player == null) return;
         try {
-            TiledmediaPlayer clearVr = TiledPlayer.access$getPlayer(player);
+            TiledmediaPlayer clearVr = player.clearVrPlayer();
             if (clearVr == null) return;
             // muteAudio is ignored until ClearVR is preparing playout, so re-assert every tick.
             if (clearVr.getIsAudioMuted() != mute) clearVr.muteAudio(mute);

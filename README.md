@@ -183,7 +183,8 @@ If the automatic download fails, you can trigger the workflow manually:
 ```
 .github/workflows/patch.yml   # CI pipeline (check, download, patch, release)
 scripts/
-  check_version.py             # APKMirror RSS parser (fallback version check)
+  check_version.py             # APKMirror RSS check (merges several feeds; survives app renames)
+  download_apkpure.sh          # APKPure download (primary, and fallback when APKMirror fails)
   download_apkm.py             # Playwright-based APKMirror downloader (fallback)
   patch.sh                     # Smali patching, signing, bundling
   install.sh                   # ADB install helper (accepts .apkm, .xapk, or directory)
@@ -308,6 +309,18 @@ sessions, automatically kept in sync with the picture. Off unless `F1TV_CUSTOM_A
 
 In CI, set them as repository **variables** (or a secret for the URL) — the workflow passes them
 through. The URL is compiled into the APK, so it is visible in your published release.
+
+Other CI variables: `F1TV_SELF_UPDATE=0` leaves out the in-app updater (on by default; it follows
+this repository's releases), `APKMIRROR_FEED_URLS` (space-separated) replaces the built-in list of
+APKMirror RSS feeds used to detect new versions.
+
+**Surviving F1TV updates.** Every hook is first looked up at its known class path and, if F1TV
+moved or renamed it, found again by structure: the player class by its constructor (an Activity)
+and its use of ClearVR's `TiledmediaPlayer`, the key hook in every activity that uses that player
+(a `dispatchKeyEvent` is added if it has none), the settings screen by `onCreatePreferences`, and
+the updater in the launcher activity from the manifest. At runtime the extension reaches F1TV's
+player only through reflection by type (`HostPlayer`), so renamed fields or Kotlin accessors do
+not break it. Required hooks that cannot be found fail the build, so no broken release is published.
 
 **How the auto-sync works.** ClearVR reports the wall-clock time of the frame on screen. The
 patch plays the radio delayed by *video lag* (now − that wall clock) plus your adjustment, so it

@@ -800,30 +800,67 @@ if [[ -n "${F1TV_CUSTOM_AUDIO_URL:-}" ]]; then
     bash "${PATCH_SCRIPT_DIR}/../extension/build.sh" "${RADIO_DEX}" || die "Custom radio extension build failed"
 
     python3 - "${DECOMPILED}" << 'PYEOF'
-import sys, re, pathlib
+import os, sys, re, pathlib
 
 root = pathlib.Path(sys.argv[1])
+IN_CI = bool(os.environ.get('GITHUB_ACTIONS'))
 
-def find(rel):
+# Every hook target is looked up at its known 3.0.x path first and, if F1TV moved or renamed it,
+# found again by what it does (structure, types it uses). Required hooks fail the build loudly;
+# optional ones only warn (as a CI annotation), so the radio still ships.
+
+def warn(msg):
+    print(f"::warning::{msg}" if IN_CI else f"  WARNING: {msg}")
+
+def die(msg):
+    print(f"::error::{msg}" if IN_CI else f"ERROR: {msg}", file=sys.stderr); sys.exit(1)
+
+def known(rel):
     hits = list(root.glob(f"smali*/{rel}"))
-    if len(hits) != 1:
-        print(f"ERROR: expected one {rel}, found {len(hits)}", file=sys.stderr); sys.exit(1)
-    return hits[0]
+    return hits[0] if len(hits) == 1 else None
 
-TP = 'Lcom/avs/f1/ui/tiledmediaplayer/TiledPlayer;'
-# Everything the extension calls. If F1TV/ClearVR renames any of these, fail loudly
-# instead of shipping a build that would throw NoSuchMethodError at runtime.
+# Library code never holds F1TV's own screens; skipping it keeps the scans quick and unambiguous.
+LIB_PREFIXES = ('android/', 'androidx/', 'kotlin/', 'kotlinx/', 'com/google/', 'com/tiledmedia/',
+                'okhttp3/', 'okio/', 'retrofit2/', 'io/', 'org/', 'dagger/', 'javax/', 'com/squareup/',
+                'com/bitmovin/', 'com/f1tvpatch/')
+_app_smali = None
+def app_smali():
+    global _app_smali
+    if _app_smali is None:
+        _app_smali = []
+        for d in sorted(root.glob('smali*')):
+            for f in d.rglob('*.smali'):
+                rel = f.relative_to(d).as_posix()
+                if not rel.startswith(LIB_PREFIXES):
+                    _app_smali.append(f)
+    return _app_smali
+
+def descriptor(text):
+    m = re.search(r'^\.class\b[^\n]*?(L[^;\s]+;)', text, re.M)
+    return m.group(1) if m else None
+
+def super_of(text):
+    m = re.search(r'^\.super (L[^;\s]+;)', text, re.M)
+    return m.group(1) if m else None
+
+def simple_name(desc):
+    return desc.rstrip(';').rsplit('/', 1)[-1]
+
+def ensure_locals(method, n):
+    """Make sure a method has at least n locals (code uses pN names, so this is safe)."""
+    m = re.search(r'\.locals (\d+)', method)
+    if m and int(m.group(1)) < n:
+        method = method.replace(m.group(0), f'.locals {n}', 1)
+    return method
+
+ACTIVITY_TYPES = ('Landroidx/appcompat/app/AppCompatActivity;', 'Landroidx/fragment/app/FragmentActivity;',
+                  'Landroidx/activity/ComponentActivity;', 'Landroidx/core/app/ComponentActivity;',
+                  'Landroid/app/Activity;')
+CLEARVR_PLAYER = 'Lcom/tiledmedia/clearvrplayer/TiledmediaPlayer;'
+
+# The ClearVR SDK is what the extension compiles against (third-party, stable names).
+# If it changes, fail instead of shipping a build that throws NoSuchMethodError at runtime.
 required = {
-    'com/avs/f1/ui/tiledmediaplayer/TiledPlayer.smali': [
-        f'.method public static final synthetic access$getViewsHolder$p({TP})Lcom/avs/f1/ui/tiledmediaplayer/TiledPlayer$ViewsHolder;',
-        f'.method public static final synthetic access$getPlayer({TP})Lcom/tiledmedia/clearvrplayer/TiledmediaPlayer;',
-        '.method public final isLiveContent()Z',
-        '.method public final isPlaying()Z',
-        '.field private final activity:Landroidx/appcompat/app/AppCompatActivity;',
-    ],
-    'com/avs/f1/ui/tiledmediaplayer/TiledPlayer$ViewsHolder.smali': [
-        '.method public abstract getMainView()Lcom/tiledmedia/clearvrview/TiledmediaView;',
-    ],
     'com/tiledmedia/clearvrview/TiledmediaView.smali': [
         '.method public getCurrentTimingReport(Lcom/tiledmedia/clearvrenums/TimingType;)Lcom/tiledmedia/clearvrparameters/TimingReport;',
     ],
@@ -843,34 +880,71 @@ required = {
     ],
 }
 for rel, needles in required.items():
-    text = find(rel).read_text()
+    path = known(rel)
+    if path is None:
+        die(f"ClearVR SDK class {rel} not found")
+    text = path.read_text()
     for needle in needles:
         if needle not in text:
-            print(f"ERROR: {rel} lacks {needle}", file=sys.stderr); sys.exit(1)
+            die(f"{rel} lacks {needle}")
 
-# Hook 1: end of the TiledPlayer constructor.
-path = find('com/avs/f1/ui/tiledmediaplayer/TiledPlayer.smali')
-content = path.read_text()
-m = re.search(r'\.method public constructor <init>\(Landroidx/appcompat/app/AppCompatActivity;.*?\.end method', content, re.DOTALL)
-if not m:
-    print("ERROR: TiledPlayer constructor not found", file=sys.stderr); sys.exit(1)
-ctor = m.group(0)
-if ctor.count('return-void') != 1 or not re.search(r'\.locals [1-9]', ctor):
-    print("ERROR: unexpected TiledPlayer constructor shape", file=sys.stderr); sys.exit(1)
-hooked = ctor.replace('    return-void', f"""    # Custom radio patch
-    iget-object v0, p0, {TP}->activity:Landroidx/appcompat/app/AppCompatActivity;
+# ── Hook 1: end of F1TV's player constructor -> RadioPatch.onPlayerCreated(player, activity) ──
+# 3.0.x: com/avs/f1/ui/tiledmediaplayer/TiledPlayer. Otherwise: the app class that takes an
+# Activity in its constructor and drives a ClearVR TiledmediaPlayer.
+CTOR_RE = re.compile(r'^\.method (?![^\n]*\bsynthetic\b)[^\n]*\bconstructor <init>\((L[^;]+;)[^)]*\)V\n.*?^\.end method', re.M | re.S)
 
-    invoke-static {{p0, v0}}, Lcom/f1tvpatch/radio/RadioPatch;->onPlayerCreated(Ljava/lang/Object;Landroid/app/Activity;)V
+def player_ctors(text):
+    return [m for m in CTOR_RE.finditer(text) if m.group(1) in ACTIVITY_TYPES]
+
+player_path = known('com/avs/f1/ui/tiledmediaplayer/TiledPlayer.smali')
+if player_path is None or not player_ctors(player_path.read_text()):
+    candidates = []
+    for f in app_smali():
+        text = f.read_text()
+        if CLEARVR_PLAYER in text and player_ctors(text):
+            candidates.append((f, text))
+    if len(candidates) > 1:
+        candidates = [c for c in candidates if 'player' in simple_name(descriptor(c[1]) or '').lower()] or candidates
+    if len(candidates) != 1:
+        die(f"F1TV player class not found (candidates: {[str(c[0].relative_to(root)) for c in candidates]})")
+    player_path = candidates[0][0]
+    print(f"  Player class found by structure: {player_path.relative_to(root)}")
+
+content = player_path.read_text()
+player_desc = descriptor(content)
+# The activity: a field of an Activity type (safe at any point), else the first constructor argument
+activity_field = None
+for m in re.finditer(r'^\.field (?!.*\bstatic\b)[^\n]*? ([\w$]+):(L[^;]+;)', content, re.M):
+    if m.group(2) in ACTIVITY_TYPES:
+        activity_field = (m.group(1), m.group(2))
+        break
+hooked_ctors = 0
+for m in player_ctors(content):
+    ctor = m.group(0)
+    # A constructor that delegates to another one of this class is covered by that one
+    if re.search(r'invoke-direct(?:/range)? \{p0[^}]*\}, ' + re.escape(player_desc) + r'-><init>', ctor):
+        continue
+    if activity_field:
+        load = f"    iget-object v0, p0, {player_desc}->{activity_field[0]}:{activity_field[1]}\n\n"
+        reg = 'v0'
+    else:
+        load, reg = '', 'p1'
+    hooked = ensure_locals(ctor, 1).replace('    return-void', f"""    # Custom radio patch
+{load}    invoke-static {{p0, {reg}}}, Lcom/f1tvpatch/radio/RadioPatch;->onPlayerCreated(Ljava/lang/Object;Landroid/app/Activity;)V
 
     return-void""")
-path.write_text(content.replace(ctor, hooked))
-print("  Hooked TiledPlayer.<init>")
+    content = content.replace(ctor, hooked)
+    hooked_ctors += 1
+if hooked_ctors == 0:
+    die(f"no usable constructor in {player_path.relative_to(root)}")
+player_path.write_text(content)
+print(f"  Hooked {simple_name(player_desc)}.<init> ({hooked_ctors}x)")
 
-# Hook 2: start of TiledPlayerActivityTv.dispatchKeyEvent (sync/toggle overlay keys).
-path = find('com/avs/f1/ui/tiledmediaplayer/TiledPlayerActivityTv.smali')
-content = path.read_text()
-pattern = r'(\.method public dispatchKeyEvent\(Landroid/view/KeyEvent;\)Z\n\s*\.locals [1-9]\d*\n)'
-hook = r"""\1
+# ── Hook 2: player activity's dispatchKeyEvent -> RadioPatch.onKeyEvent (bar/panel keys) ──
+# 3.0.x: TiledPlayerActivityTv. Otherwise: every activity that uses the player class. Extra
+# activities are harmless: onKeyEvent ignores any activity the radio is not attached to.
+KEY_SIG = 'dispatchKeyEvent(Landroid/view/KeyEvent;)Z'
+KEY_HOOK = """
     # Custom radio patch
     invoke-static {p0, p1}, Lcom/f1tvpatch/radio/RadioPatch;->onKeyEvent(Landroid/app/Activity;Landroid/view/KeyEvent;)Z
 
@@ -884,13 +958,57 @@ hook = r"""\1
 
     :f1radio_not_consumed
 """
-content, n = re.subn(pattern, hook, content, count=1)
-if n != 1:
-    print("ERROR: TiledPlayerActivityTv.dispatchKeyEvent not found", file=sys.stderr); sys.exit(1)
-path.write_text(content)
-print("  Hooked TiledPlayerActivityTv.dispatchKeyEvent")
 
-# Hook 3: ClearVR's audio output, so the F1 audio can be matched against the radio's circuit
+def hook_key_events(path):
+    text = path.read_text()
+    if 'RadioPatch;->onKeyEvent' in text:
+        return True
+    m = re.search(r'^\.method public (?:final )?' + re.escape(KEY_SIG) + r'\n.*?^\.end method', text, re.M | re.S)
+    if m:
+        method = ensure_locals(m.group(0), 1)
+        method, n = re.subn(r'(\.locals \d+\n)', lambda mm: mm.group(1) + KEY_HOOK, method, count=1)
+        if n != 1:
+            return False
+        text = text.replace(m.group(0), method)
+    else:
+        sup = super_of(text)
+        if not sup:
+            return False
+        text += f"""
+.method public {KEY_SIG}
+    .locals 1
+{KEY_HOOK}
+    invoke-super {{p0, p1}}, {sup}->{KEY_SIG}
+
+    move-result v0
+
+    return v0
+.end method
+"""
+    path.write_text(text)
+    return True
+
+key_targets = []
+known_activity = known('com/avs/f1/ui/tiledmediaplayer/TiledPlayerActivityTv.smali')
+if known_activity is not None:
+    key_targets.append(known_activity)
+else:
+    for f in app_smali():
+        if f == player_path:
+            continue
+        text = f.read_text()
+        sup = super_of(text) or ''
+        if player_desc in text and (sup in ACTIVITY_TYPES or sup.endswith('Activity;')) and '.class public' in text \
+                and ' abstract ' not in text.split('\n', 1)[0]:
+            key_targets.append(f)
+    print(f"  Player activities found by structure: {[str(f.relative_to(root)) for f in key_targets]}")
+hooked_keys = [f for f in key_targets if hook_key_events(f)]
+if not hooked_keys:
+    die("no player activity to hook dispatchKeyEvent in")
+for f in hooked_keys:
+    print(f"  Hooked {f.stem}.dispatchKeyEvent")
+
+# ── Hook 3: ClearVR's audio output, so the F1 audio can be matched against the radio's circuit ──
 # sound (acoustic sync). Optional: without it the radio still syncs on the video clock.
 # Found by signature across all of ClearVR (com/tiledmedia), so it survives class renames
 # between F1TV versions. Each AudioTrack.write overload maps to the AudioTap method with the
@@ -918,48 +1036,76 @@ for smali in root.glob('smali*/com/tiledmedia/**/*.smali'):
         smali.write_text(new_text)
         print(f"  Hooked AudioTrack.write in {smali.relative_to(root)} (acoustic sync)")
 if hooked_writes == 0:
-    print("  WARNING: no ClearVR AudioTrack.write call found; acoustic sync unavailable")
+    warn("no ClearVR AudioTrack.write call found; acoustic sync unavailable")
 
-# Hook 4: radio (and update) options in F1TV's own settings screen. Optional.
-hits = list(root.glob('smali*/com/avs/f1/ui/settings/SettingsFragment$PrefFragment.smali'))
-if len(hits) == 1:
-    content = hits[0].read_text()
-    m = re.search(r'\.method public onCreatePreferences\(Landroid/os/Bundle;Ljava/lang/String;\)V.*?\.end method', content, re.DOTALL)
-    if m:
-        method = m.group(0)
-        hooked = method.replace('    return-void', '''    invoke-static {p0}, Lcom/f1tvpatch/radio/RadioSettings;->onCreatePreferences(Ljava/lang/Object;)V
+# ── Hook 4: radio (and update) options in F1TV's own settings screen. Optional. ──
+# 3.0.x: SettingsFragment$PrefFragment. Otherwise: the one app class under a "settings" package
+# that builds a preference screen (onCreatePreferences).
+PREFS_RE = re.compile(r'^\.method public (?:final )?onCreatePreferences\(Landroid/os/Bundle;Ljava/lang/String;\)V\n.*?^\.end method', re.M | re.S)
+settings_path = known('com/avs/f1/ui/settings/SettingsFragment$PrefFragment.smali')
+if settings_path is None or not PREFS_RE.search(settings_path.read_text()):
+    found = [f for f in app_smali() if 'settings' in f.as_posix().lower() and PREFS_RE.search(f.read_text())]
+    if len(found) > 1:
+        found = [f for f in found if 'settings' in f.stem.lower()] or found
+    settings_path = found[0] if len(found) == 1 else None
+    if settings_path is not None:
+        print(f"  Settings screen found by structure: {settings_path.relative_to(root)}")
+if settings_path is not None:
+    content = settings_path.read_text()
+    method = PREFS_RE.search(content).group(0)
+    hooked = method.replace('    return-void', '''    invoke-static {p0}, Lcom/f1tvpatch/radio/RadioSettings;->onCreatePreferences(Ljava/lang/Object;)V
 
     return-void''')
-        hits[0].write_text(content.replace(method, hooked))
-        print("  Hooked SettingsFragment.PrefFragment.onCreatePreferences (radio settings)")
-    else:
-        print("  WARNING: onCreatePreferences not found; no radio settings screen")
+    settings_path.write_text(content.replace(method, hooked))
+    print(f"  Hooked {settings_path.stem}.onCreatePreferences (radio settings)")
 else:
-    print("  WARNING: SettingsFragment$PrefFragment not found; no radio settings screen")
+    warn("F1TV settings screen not found; radio settings only in the player panel")
 
-# Hook 5: in-app updater, started from the splash screen (only when an update repo is set).
-import os
+# ── Hook 5: in-app updater, started when the app launches (only when an update repo is set). ──
+# 3.0.x: SplashActivity. Otherwise: the launcher activity named in the manifest.
+ONCREATE_SUPER_RE = re.compile(r'invoke-super \{p0, ([pv]\d+)\}, (L[^;]+;)->onCreate\(Landroid/os/Bundle;\)V')
+
+def launcher_activity_path():
+    manifest = (root / 'AndroidManifest.xml').read_text()
+    package = re.search(r'<manifest[^>]*\bpackage="([^"]+)"', manifest).group(1)
+    blocks = re.findall(r'<activity(?:-alias)?\b[^>]*>.*?</activity(?:-alias)?>', manifest, re.S)
+    for category in ('android.intent.category.LEANBACK_LAUNCHER', 'android.intent.category.LAUNCHER'):
+        for block in blocks:
+            if category not in block:
+                continue
+            target = re.search(r'android:targetActivity="([^"]+)"', block) or re.search(r'android:name="([^"]+)"', block)
+            name = target.group(1)
+            if name.startswith('.'):
+                name = package + name
+            path = known(name.replace('.', '/') + '.smali')
+            if path is not None:
+                return path
+    return None
+
 if os.environ.get('F1TV_UPDATE_REPO'):
-    hits = list(root.glob('smali*/com/avs/f1/ui/splash/SplashActivity.smali'))
-    if len(hits) == 1:
-        content = hits[0].read_text()
-        superCall = 'invoke-super {p0, p1}, Landroidx/fragment/app/FragmentActivity;->onCreate(Landroid/os/Bundle;)V'
-        if content.count(superCall) == 1:
-            content = content.replace(superCall, superCall + '''
+    candidates = [p for p in (known('com/avs/f1/ui/splash/SplashActivity.smali'), launcher_activity_path()) if p is not None]
+    hooked_updater = False
+    for path in candidates:
+        content = path.read_text()
+        m = re.search(r'^\.method (?:public|protected) (?:final )?onCreate\(Landroid/os/Bundle;\)V\n.*?^\.end method', content, re.M | re.S)
+        calls = ONCREATE_SUPER_RE.findall(m.group(0)) if m else []
+        if len(calls) != 1:
+            continue
+        method = ONCREATE_SUPER_RE.sub(lambda mm: mm.group(0) + '''
 
-    invoke-static {p0}, Lcom/f1tvpatch/radio/Updater;->onLaunch(Landroid/app/Activity;)V''')
-            hits[0].write_text(content)
-            manifest = root / 'AndroidManifest.xml'
-            text = manifest.read_text()
-            permission = '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>'
-            if permission not in text:
-                text = text.replace('<uses-permission ', permission + '\n    <uses-permission ', 1)
-                manifest.write_text(text)
-            print("  Hooked SplashActivity.onCreate (in-app updater) + REQUEST_INSTALL_PACKAGES")
-        else:
-            print("  WARNING: SplashActivity.onCreate super call not found; no in-app updater")
-    else:
-        print("  WARNING: SplashActivity not found; no in-app updater")
+    invoke-static {p0}, Lcom/f1tvpatch/radio/Updater;->onLaunch(Landroid/app/Activity;)V''', m.group(0), count=1)
+        path.write_text(content.replace(m.group(0), method))
+        manifest_path = root / 'AndroidManifest.xml'
+        text = manifest_path.read_text()
+        permission = '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>'
+        if permission not in text:
+            text = text.replace('<uses-permission ', permission + '\n    <uses-permission ', 1)
+            manifest_path.write_text(text)
+        print(f"  Hooked {path.stem}.onCreate (in-app updater) + REQUEST_INSTALL_PACKAGES")
+        hooked_updater = True
+        break
+    if not hooked_updater:
+        warn("no launch activity onCreate to hook; no in-app updater in this build")
 PYEOF
     ok "Custom radio hooks applied (dex is injected after rebuild)"
 else
@@ -1264,12 +1410,22 @@ fi
 fi # UHD_PATCHES
 if [[ -n "${F1TV_CUSTOM_AUDIO_URL:-}" ]]; then
     # Required radio hooks; the acoustic-sync tap and the settings/updater hooks are optional extras
-    verify_marker 'TiledPlayer.smali'           '*/avs/f1/ui/tiledmediaplayer/*' 'RadioPatch;->onPlayerCreated' 'custom radio: player hook'
-    verify_marker 'TiledPlayerActivityTv.smali' '*/avs/f1/ui/tiledmediaplayer/*' 'RadioPatch;->onKeyEvent'      'custom radio: key hook'
+    # Hook targets may be found by structure in a renamed F1TV, so look for the markers anywhere
+    for hook in 'onPlayerCreated:player hook' 'onKeyEvent:key hook'; do
+        if grep -rqF -- "RadioPatch;->${hook%%:*}" "${DECOMPILED}"/smali*; then
+            ok "  custom radio: ${hook#*:}"
+        else
+            warn "  NOT APPLIED: custom radio: ${hook#*:}"; VERIFY_FAILED=1
+        fi
+    done
     if grep -rqE 'AudioTap;->write' "${DECOMPILED}"/smali*/com/tiledmedia 2>/dev/null; then
         ok "  custom radio: acoustic sync audio tap"
     else
         warn "  custom radio: acoustic sync audio tap not applied (radio still syncs on the video clock)"
+    fi
+    grep -rqF 'RadioSettings;->onCreatePreferences' "${DECOMPILED}"/smali*         && ok "  custom radio: settings screen" || warn "  custom radio: no settings screen entry (optional)"
+    if [[ -n "${F1TV_UPDATE_REPO:-}" ]]; then
+        grep -rqF 'Updater;->onLaunch' "${DECOMPILED}"/smali*             && ok "  in-app updater (${F1TV_UPDATE_REPO})" || warn "  in-app updater not applied (optional)"
     fi
 fi
 if [[ "${F1TV_DECODER_MAX_RES:-1}" != "0" ]]; then

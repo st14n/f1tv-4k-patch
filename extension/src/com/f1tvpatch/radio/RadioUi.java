@@ -10,6 +10,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.os.SystemClock;
+import android.util.Log;
 import android.util.TypedValue;
 import android.view.FocusFinder;
 import android.view.Gravity;
@@ -578,31 +579,68 @@ final class RadioUi {
                 new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
-    /** F1's TiledPlayerPlaybackControls.isControlsVisible(), found by class name so a rename only disables auto-show. */
+    /**
+     * Whether F1's own player controls are on screen. 3.0.x: TiledPlayerPlaybackControls.isControlsVisible().
+     * Found by name pattern with fallbacks, so a rename at worst falls back to the view's visibility.
+     */
     private boolean areF1ControlsVisible(Activity activity) {
         if (controlsLookupFailed) return false;
         try {
             View controls = controlsRef.get();
             if (controls == null || controls.getWindowToken() == null) {
-                controls = findByClassName(activity.getWindow().getDecorView(), "TiledPlayerPlaybackControls");
+                controls = findControls(activity.getWindow().getDecorView());
                 if (controls == null) return false;
                 controlsRef = new WeakReference<>(controls);
-                controlsVisibleMethod = controls.getClass().getMethod("isControlsVisible");
+                controlsVisibleMethod = findVisibilityMethod(controls.getClass());
+                Log.i(RadioEngine.TAG, "F1 controls: " + controls.getClass().getName() + " via "
+                        + (controlsVisibleMethod != null ? controlsVisibleMethod.getName() + "()" : "isShown()"));
             }
-            return Boolean.TRUE.equals(controlsVisibleMethod.invoke(controls));
+            if (controlsVisibleMethod != null) return Boolean.TRUE.equals(controlsVisibleMethod.invoke(controls));
+            return controls.isShown() && controls.getAlpha() > 0.5f;
         } catch (Throwable t) {
             controlsLookupFailed = true;
             return false;
         }
     }
 
-    private View findByClassName(View view, String simpleName) {
+    /** Best match first: the 3.0.x class, then "...PlaybackControls", then any F1 "...Controls" view. */
+    private View findControls(View decor) {
+        String[] patterns = {"tiledplayerplaybackcontrols", "playbackcontrols", "controls"};
+        for (String pattern : patterns) {
+            View found = findByClassName(decor, pattern);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private static Method findVisibilityMethod(Class<?> type) {
+        try {
+            return type.getMethod("isControlsVisible");
+        } catch (NoSuchMethodException ignored) {
+            // renamed: any public no-arg boolean "is...controls...visible/shown"
+        }
+        for (Method m : type.getMethods()) {
+            String name = m.getName().toLowerCase(Locale.ROOT);
+            if (m.getParameterTypes().length == 0 && m.getReturnType() == boolean.class && name.startsWith("is")
+                    && name.contains("control") && (name.contains("visible") || name.contains("shown") || name.contains("showing"))) {
+                return m;
+            }
+        }
+        return null;
+    }
+
+    /** Depth-first search for an app (non-framework) view whose class name contains the lowercase pattern. */
+    private View findByClassName(View view, String pattern) {
         if (view == root) return null;
-        if (view.getClass().getSimpleName().equals(simpleName)) return view;
+        String name = view.getClass().getName();
+        if (!name.startsWith("android.") && !name.startsWith("androidx.")
+                && view.getClass().getSimpleName().toLowerCase(Locale.ROOT).contains(pattern)) {
+            return view;
+        }
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) view;
             for (int i = 0; i < group.getChildCount(); i++) {
-                View found = findByClassName(group.getChildAt(i), simpleName);
+                View found = findByClassName(group.getChildAt(i), pattern);
                 if (found != null) return found;
             }
         }
