@@ -24,6 +24,7 @@ public final class RadioSettings {
     private static final String TAG = RadioEngine.TAG;
     private static final String CATEGORY_KEY = "f1tvpatch_radio";
     private static final String UPDATES_KEY = "f1tvpatch_updates";
+    private static final String ACCOUNT_KEY = "f1tvpatch_account";
 
     /** Called at the end of F1TV's {@code SettingsFragment.PrefFragment.onCreatePreferences}. */
     public static void onCreatePreferences(Object fragment) {
@@ -34,6 +35,7 @@ public final class RadioSettings {
             PreferenceScreen screen = prefFragment.getPreferenceScreen();
             if (activity == null || screen == null || screen.findPreference(CATEGORY_KEY) != null) return;
             addRadioSection(activity, screen);
+            addAccountSection(activity, screen);
             if (Updater.isConfigured()) addUpdateSection(activity, screen);
         } catch (Throwable t) {
             // An F1TV update changed the settings screen: leave it as it is
@@ -71,6 +73,30 @@ public final class RadioSettings {
             return true;
         });
         category.addPreference(correction);
+    }
+
+    private static void addAccountSection(Context c, PreferenceScreen screen) {
+        SharedPreferences prefs = Updater.prefs(c);
+        PreferenceCategory category = new PreferenceCategory(c);
+        category.setKey(ACCOUNT_KEY);
+        category.setTitle(t("Inloggen (patch)", "Sign-in (patch)"));
+        category.setIconSpaceReserved(false);
+        screen.addPreference(category);
+
+        String[] account = LoginStore.load(c);
+        String summary = account == null
+                ? t("Geen account opgeslagen. Op de pc: scripts/set_login.sh (leest .env).",
+                    "No account stored. On the PC: scripts/set_login.sh (reads .env).")
+                : t("Logt opnieuw in als F1 TV je uitlogt: ", "Signs back in when F1 TV signs you out: ")
+                    + LoginReceiver.mask(account[0]);
+        String last = AutoLogin.lastResult(c);
+        if (last != null) summary += t("\nLaatste poging: ", "\nLast attempt: ") + last;
+        category.addPreference(toggle(c, prefs, AutoLogin.KEY_ENABLED, true,
+                t("Automatisch opnieuw inloggen", "Sign in again automatically"), summary));
+        category.addPreference(toggle(c, prefs, Launch.KEY_F1_LOGS, false,
+                t("Diagnose-logs", "Diagnostic logs"),
+                t("F1 TV's eigen logs naar logcat (vanaf de volgende start). Alleen voor foutzoeken.",
+                        "F1 TV's own logs to logcat (from the next start). For troubleshooting only.")));
     }
 
     private static void addUpdateSection(final Activity activity, PreferenceScreen screen) {

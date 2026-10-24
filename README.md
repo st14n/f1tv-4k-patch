@@ -185,6 +185,7 @@ If the automatic download fails, you can trigger the workflow manually:
 scripts/
   check_version.py             # APKMirror RSS check (merges several feeds; survives app renames)
   download_apkpure.sh          # APKPure download (primary, and fallback when APKMirror fails)
+  set_login.sh                 # Store your F1 account on the TV for automatic re-login (reads .env)
   download_apkm.py             # Playwright-based APKMirror downloader (fallback)
   patch.sh                     # Smali patching, signing, bundling
   install.sh                   # ADB install helper (accepts .apkm, .xapk, or directory)
@@ -313,6 +314,24 @@ through. The URL is compiled into the APK, so it is visible in your published re
 Other CI variables: `F1TV_SELF_UPDATE=0` leaves out the in-app updater (on by default; it follows
 this repository's releases), `APKMIRROR_FEED_URLS` (space-separated) replaces the built-in list of
 APKMirror RSS feeds used to detect new versions.
+
+**Automatic re-login.** F1 TV restores its session at launch with a "silent login"; when F1's
+server rejects it, the app wipes the session and shows the sign-in screen. Store your account once
+from the PC and the patch signs back in by itself, with the app's own password login and the same
+device id (so no extra device slot):
+
+```bash
+ADB_SERIAL=192.168.1.50:5555 scripts/set_login.sh path/to/.env   # F1_username / F1_password
+```
+
+The account goes over adb only (the receiver requires `android.permission.DUMP`, which only the adb
+shell and the system hold), is encrypted with an Android Keystore key on the TV, and is never part
+of the APK or a release. Attempts are rate-limited (one per 10 minutes). Settings → *Sign-in
+(patch)* shows the stored account and the last result; `scripts/set_login.sh --clear` removes it.
+
+The patched app is signed with your own key, and Android gives every signing key its own
+`ANDROID_ID`, which F1 TV uses as the device id: the patched app counts as a different device
+than the Play Store app. Keep the same keystore for every build so it stays one device.
 
 **Surviving F1TV updates.** Every hook is first looked up at its known class path and, if F1TV
 moved or renamed it, found again by structure: the player class by its constructor (an Activity)
