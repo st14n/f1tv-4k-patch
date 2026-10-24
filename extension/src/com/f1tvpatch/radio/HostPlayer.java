@@ -37,6 +37,8 @@ final class HostPlayer {
     // ClearVR player: a static accessor, a field holding it, or a kotlin.Lazy around it
     private Method clearVrAccessor;
     private Field clearVrField;
+    private final List<Field> lazyFields = new ArrayList<>();
+    private Field lazyPlayerField;
     private boolean clearVrResolved;
 
     // Main video view: field -> (optional) holder method that returns the TiledmediaView
@@ -79,43 +81,74 @@ final class HostPlayer {
         return playingMethod == null || Boolean.TRUE.equals(playingMethod.invoke(player()));
     }
 
-    /** ClearVR's player, or null when it is not created (yet). Never forces a lazy one into existence. */
+    /**
+     * ClearVR's player, or null when it is not created (yet). Never creates one: F1TV builds it in a
+     * lazy initializer, and calling that initializer (an R8 "$r8$lambda$" / "lambda$" bridge with the
+     * same signature as the accessor) would make a fresh player on every call.
+     *
+     * Order: a field holding the player, or a kotlin.Lazy whose (initialized) value is the player;
+     * only without such a field, the Kotlin accessor access$getPlayer (or another "access$" bridge).
+     */
     TiledmediaPlayer clearVrPlayer() throws Exception {
         if (!clearVrResolved) {
             clearVrResolved = true;
-            for (Method m : allMethods(type)) {
-                Class<?>[] params = m.getParameterTypes();
-                if (Modifier.isStatic(m.getModifiers()) && params.length == 1 && params[0].isAssignableFrom(type)
-                        && TiledmediaPlayer.class.isAssignableFrom(m.getReturnType())) {
-                    m.setAccessible(true);
-                    clearVrAccessor = m;
+            for (Field f : allFields(type)) {
+                if (TiledmediaPlayer.class.isAssignableFrom(f.getType())) {
+                    f.setAccessible(true);
+                    clearVrField = f;
                     break;
                 }
+                if (isKotlinLazy(f.getType())) {
+                    f.setAccessible(true);
+                    lazyFields.add(f);
+                }
             }
-            if (clearVrAccessor == null) {
-                for (Field f : allFields(type)) {
-                    if (TiledmediaPlayer.class.isAssignableFrom(f.getType()) || isKotlinLazy(f.getType())) {
-                        f.setAccessible(true);
-                        if (TiledmediaPlayer.class.isAssignableFrom(f.getType())) { clearVrField = f; break; }
-                        if (clearVrField == null) clearVrField = f;
+            if (clearVrField == null && lazyFields.isEmpty()) {
+                for (Method m : allMethods(type)) {
+                    Class<?>[] params = m.getParameterTypes();
+                    String name = m.getName();
+                    if (Modifier.isStatic(m.getModifiers()) && params.length == 1 && params[0].isAssignableFrom(type)
+                            && TiledmediaPlayer.class.isAssignableFrom(m.getReturnType())
+                            && name.startsWith("access$") && !name.contains("lambda")) {
+                        m.setAccessible(true);
+                        clearVrAccessor = m;
+                        if (name.equals("access$getPlayer")) break;
                     }
                 }
             }
-            Log.i(TAG, "host ClearVR player: " + describe(clearVrAccessor != null ? clearVrAccessor : clearVrField));
+            Log.i(TAG, "host ClearVR player: " + (clearVrField != null ? describe(clearVrField)
+                    : clearVrAccessor != null ? describe(clearVrAccessor)
+                    : lazyFields.size() + " lazy field(s), initialized value checked"));
         }
-        if (clearVrAccessor != null) {
-            Object value = clearVrAccessor.invoke(null, player());
+        Object target = player();
+        if (clearVrField != null) {
+            Object value = clearVrField.get(target);
             return value instanceof TiledmediaPlayer ? (TiledmediaPlayer) value : null;
         }
-        if (clearVrField != null) {
-            Object value = clearVrField.get(player());
-            if (value != null && isKotlinLazy(value.getClass())) {
-                if (!Boolean.TRUE.equals(value.getClass().getMethod("isInitialized").invoke(value))) return null;
-                value = value.getClass().getMethod("getValue").invoke(value);
+        if (lazyPlayerField != null) {
+            TiledmediaPlayer value = initializedLazyValue(lazyPlayerField.get(target));
+            if (value != null) return value;
+        }
+        for (Field f : lazyFields) {
+            TiledmediaPlayer value = initializedLazyValue(f.get(target));
+            if (value != null) {
+                lazyPlayerField = f;
+                return value;
             }
+        }
+        if (clearVrAccessor != null) {
+            Object value = clearVrAccessor.invoke(null, target);
             return value instanceof TiledmediaPlayer ? (TiledmediaPlayer) value : null;
         }
         return null;
+    }
+
+    /** The value of an already-initialized kotlin.Lazy if it is a ClearVR player; never initializes it. */
+    private static TiledmediaPlayer initializedLazyValue(Object lazy) throws Exception {
+        if (lazy == null || !isKotlinLazy(lazy.getClass())) return null;
+        if (!Boolean.TRUE.equals(lazy.getClass().getMethod("isInitialized").invoke(lazy))) return null;
+        Object value = lazy.getClass().getMethod("getValue").invoke(lazy);
+        return value instanceof TiledmediaPlayer ? (TiledmediaPlayer) value : null;
     }
 
     /** The ClearVR view showing the main feed, or null if there is none right now. */
