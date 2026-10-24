@@ -27,6 +27,11 @@ public final class Launch {
         } catch (Throwable t) {
             Log.w(RadioEngine.TAG, "auto-login setup failed", t);
         }
+        try {
+            TvSettingsEntry.install(launcher);
+        } catch (Throwable t) {
+            Log.w(RadioEngine.TAG, "settings button setup failed", t);
+        }
         Updater.onLaunch(launcher);
     }
 

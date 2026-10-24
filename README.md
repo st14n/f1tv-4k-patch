@@ -326,8 +326,14 @@ ADB_SERIAL=192.168.1.50:5555 scripts/set_login.sh path/to/.env   # F1_username /
 
 The account goes over adb only (the receiver requires `android.permission.DUMP`, which only the adb
 shell and the system hold), is encrypted with an Android Keystore key on the TV, and is never part
-of the APK or a release. Attempts are rate-limited (one per 10 minutes). Settings → *Sign-in
-(patch)* shows the stored account and the last result; `scripts/set_login.sh --clear` removes it.
+of the APK or a release. Attempts are rate-limited (one per 10 minutes). The patch's settings
+screen shows the stored account and the last result; `scripts/set_login.sh --clear` removes it.
+
+**Settings on the TV.** F1 TV's settings page (side menu → Settings) gets an extra
+**Grand Prix Radio** button, built from F1 TV's own button layout. It opens the patch's settings
+screen: radio on/off, automatic sync, circuit-sound matching, reset correction, automatic
+sign-in (with the stored account and device id), diagnostic logs and updates. The button is added
+at runtime by recognising the page's button ids, so no F1 TV class is hooked for it.
 
 **One device, for good.** F1 TV registers itself as a device identified by `ANDROID_ID`, which
 Android derives from the app's signing key (and resets on a factory reset): a new keystore, a
@@ -340,8 +346,9 @@ Devices that already used up slots are released on F1's side (account page / F1 
 **Surviving F1TV updates.** Every hook is first looked up at its known class path and, if F1TV
 moved or renamed it, found again by structure: the player class by its constructor (an Activity)
 and its use of ClearVR's `TiledmediaPlayer`, the key hook in every activity that uses that player
-(a `dispatchKeyEvent` is added if it has none), the settings screen by `onCreatePreferences`, and
-the updater in the launcher activity from the manifest. At runtime the extension reaches F1TV's
+(a `dispatchKeyEvent` is added if it has none), the sign-in state stream by the class that has
+`performLogin` + `performSilentLogin`, the device id wherever F1 TV reads `android_id`, and the
+launch hook in the launcher activity from the manifest. At runtime the extension reaches F1TV's
 player only through reflection by type (`HostPlayer`), so renamed fields or Kotlin accessors do
 not break it. Required hooks that cannot be found fail the build, so no broken release is published.
 
