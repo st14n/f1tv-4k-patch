@@ -7,6 +7,9 @@ set -euo pipefail
 #
 # Usage: scripts/set_login.sh [path/to/.env] [--clear]
 #   .env keys: F1_username / F1_password (F1_USERNAME / F1_PASSWORD also work)
+#              F1_DEVICE_ID (optional): the F1 device id to keep using. The script prints the id the
+#              app has pinned; put it in .env so a reinstall (even with another key) stays the
+#              same registered device and never counts against F1's device limit.
 #   ADB_SERIAL=<ip:port> selects the TV when several devices are connected.
 #   --clear removes the stored account from the TV.
 
@@ -27,9 +30,11 @@ ENV_FILE="${ENV_FILE:-${F1_ENV_FILE:-.env}}"
 ADB=(adb)
 [[ -n "${ADB_SERIAL:-}" ]] && ADB=(adb -s "${ADB_SERIAL}")
 
+DEVICE_ID_REPORTED=""
 send() {
     local out
     out="$("${ADB[@]}" shell am broadcast -n "${RECEIVER}" -a "${ACTION}" "$@" 2>&1)"
+    if [[ "${out}" =~ device_id=([A-Za-z0-9._-]+) ]]; then DEVICE_ID_REPORTED="${BASH_REMATCH[1]}"; fi
     case "${out}" in
         *"result=1"*) return 0 ;;
         *"result=2"*) echo "The TV app got an empty username or password." >&2 ;;
@@ -72,7 +77,18 @@ PASSWORD="$(read_env F1_password F1_PASSWORD || true)"
 
 # base64 keeps any character safe through the adb shell
 b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
-send --es email_b64 "$(b64 "${EMAIL}")" --es password_b64 "$(b64 "${PASSWORD}")" --ez login_now true
+DEVICE_ID="$(read_env F1_DEVICE_ID || true)"
+DEVICE_ARGS=()
+[[ -n "${DEVICE_ID}" ]] && DEVICE_ARGS=(--es device_id "${DEVICE_ID}")
+send --es email_b64 "$(b64 "${EMAIL}")" --es password_b64 "$(b64 "${PASSWORD}")" --ez login_now true "${DEVICE_ARGS[@]}"
 unset EMAIL PASSWORD
 echo "Account stored on the TV. If the app is on the sign-in screen it signs in now; otherwise"
 echo "it signs back in by itself whenever F1 TV drops the session."
+if [[ -n "${DEVICE_ID_REPORTED}" && "${DEVICE_ID_REPORTED}" != "null" ]]; then
+    echo "F1 device id in use: ${DEVICE_ID_REPORTED}"
+    if [[ -z "${DEVICE_ID}" ]]; then
+        echo "Add this line to ${ENV_FILE} to keep it across reinstalls:  F1_DEVICE_ID=${DEVICE_ID_REPORTED}"
+    elif [[ "${DEVICE_ID}" != "${DEVICE_ID_REPORTED}" ]]; then
+        echo "(F1_DEVICE_ID from .env applies from the next app start)"
+    fi
+fi

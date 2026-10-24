@@ -25,6 +25,17 @@ public final class LoginReceiver extends BroadcastReceiver {
                 setResultCode(1);
                 return;
             }
+            // Device id (F1_DEVICE_ID in .env): same registered device across reinstalls and keys
+            String deviceId = intent.getStringExtra("device_id");
+            if (deviceId != null && deviceId.matches("[A-Za-z0-9._-]{8,64}")
+                    && !deviceId.equals(DeviceId.current(context))) {
+                DeviceId.set(context, deviceId);
+            }
+            setResultData("device_id=" + DeviceId.current(context));
+            if (intent.getBooleanExtra("device_only", false)) {
+                setResultCode(1);
+                return;
+            }
             String email = decode(intent.getStringExtra("email_b64"));
             String password = decode(intent.getStringExtra("password_b64"));
             if (email.isEmpty() || password.isEmpty()) {
