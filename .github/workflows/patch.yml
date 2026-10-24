@@ -254,9 +254,19 @@ jobs:
           curl -sSL "https://github.com/Alexvbp/apkeep/releases/download/${APKEEP_CUSTOM_TAG}/apkeep-x86_64-linux.tar.gz" | tar xz -C /usr/local/bin/
           chmod +x /usr/local/bin/apkeep
 
+      # Original (unpatched) bundle of this exact version from an earlier run: rebuilds, branch
+      # and forced builds then need no download source at all.
+      - name: Restore original bundle cache
+        if: ${{ !inputs.apkm_url }}
+        id: apkm_cache
+        uses: actions/cache/restore@v5
+        with:
+          path: download-cache/
+          key: apkm-original-${{ needs.check.outputs.version }}
+
       # ── Option A: Download from Google Play (arm64 via Shield profile) ──
       - name: Download from Google Play
-        if: ${{ !inputs.apkm_url && env.GOOGLE_EMAIL != '' && needs.check.outputs.source != 'apkmirror' }}
+        if: ${{ !inputs.apkm_url && env.GOOGLE_EMAIL != '' && needs.check.outputs.source != 'apkmirror' && steps.apkm_cache.outputs.cache-hit != 'true' }}
         id: download_gplay
         run: |
           mkdir -p download
@@ -348,7 +358,7 @@ jobs:
 
       # ── Option B: Download from APKPure via apkeep ──
       - name: Download from APKPure
-        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && needs.check.outputs.source != 'apkmirror' }}
+        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && needs.check.outputs.source != 'apkmirror' && steps.apkm_cache.outputs.cache-hit != 'true' }}
         id: download_apkpure
         run: |
           echo "Google Play unavailable, falling back to APKPure..."
@@ -359,7 +369,7 @@ jobs:
 
       # ── Option C: Download from APKMirror via Playwright ──
       - name: Check latest version from RSS
-        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && steps.download_apkpure.outcome != 'success' && needs.check.outputs.apkmirror_release_url == '' }}
+        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && steps.download_apkpure.outcome != 'success' && needs.check.outputs.apkmirror_release_url == '' && steps.apkm_cache.outputs.cache-hit != 'true' }}
         id: rss
         run: python scripts/check_version.py
         continue-on-error: true
@@ -375,17 +385,26 @@ jobs:
           echo "variant_url=${{ needs.check.outputs.apkmirror_variant_url }}" >> "$GITHUB_OUTPUT"
 
       - name: Download APKM from APKMirror
-        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && steps.download_apkpure.outcome != 'success' && (steps.rss.outputs.release_url != '' || steps.rss_reuse.outputs.release_url != '') }}
+        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && steps.download_apkpure.outcome != 'success' && (steps.rss.outputs.release_url != '' || steps.rss_reuse.outputs.release_url != '') && steps.apkm_cache.outputs.cache-hit != 'true' }}
         id: download_auto
         run: |
           echo "Downloading from APKMirror..."
           mkdir -p download
           RELEASE_URL="${{ steps.rss_reuse.outputs.release_url || steps.rss.outputs.release_url }}"
           VARIANT_URL="${{ steps.rss_reuse.outputs.variant_url || steps.rss.outputs.variant_url }}"
-          APKM_PATH=$(python scripts/download_apkm.py \
-            "${RELEASE_URL}" \
-            --variant-url "${VARIANT_URL}" \
-            -o download)
+          # APKMirror's download endpoint stalls now and then (rate limit / Cloudflare): retry
+          for attempt in 1 2 3; do
+            if APKM_PATH=$(python scripts/download_apkm.py \
+                "${RELEASE_URL}" \
+                --variant-url "${VARIANT_URL}" \
+                -o download); then
+              break
+            fi
+            APKM_PATH=""
+            echo "::warning::APKMirror download attempt ${attempt} failed"
+            [[ ${attempt} -lt 3 ]] && sleep $((attempt * 60))
+          done
+          [[ -n "${APKM_PATH}" ]] || exit 1
           echo "apkm_path=${APKM_PATH}" >> "$GITHUB_OUTPUT"
           echo "source=apkmirror" >> "$GITHUB_OUTPUT"
         continue-on-error: true
@@ -393,7 +412,7 @@ jobs:
       # APKMirror was the source but its download failed (Cloudflare, page layout change):
       # APKPure is a safety net when it lists the very same version.
       - name: Download from APKPure (APKMirror fallback)
-        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && steps.download_apkpure.outcome != 'success' && steps.download_auto.outcome != 'success' && needs.check.outputs.apkpure_version_short != '' && needs.check.outputs.apkpure_version_short == needs.check.outputs.version_short }}
+        if: ${{ !inputs.apkm_url && steps.download_gplay.outcome != 'success' && steps.download_apkpure.outcome != 'success' && steps.download_auto.outcome != 'success' && needs.check.outputs.apkpure_version_short != '' && needs.check.outputs.apkpure_version_short == needs.check.outputs.version_short && steps.apkm_cache.outputs.cache-hit != 'true' }}
         id: download_apkpure_fallback
         run: |
           APKM_PATH=$(bash scripts/download_apkpure.sh "${{ needs.check.outputs.apkpure_version }}" download_fallback)
@@ -424,6 +443,10 @@ jobs:
         run: |
           if [[ -n "${{ steps.download_url.outputs.apkm_path }}" ]]; then
             echo "path=${{ steps.download_url.outputs.apkm_path }}" >> "$GITHUB_OUTPUT"
+          elif [[ -f download-cache/original.apkm ]]; then
+            echo "Using cached original bundle of ${{ needs.check.outputs.version }}"
+            echo "path=download-cache/original.apkm" >> "$GITHUB_OUTPUT"
+            echo "source=cache" >> "$GITHUB_OUTPUT"
           elif [[ -n "${{ steps.download_gplay.outputs.apkm_path }}" ]]; then
             echo "path=${{ steps.download_gplay.outputs.apkm_path }}" >> "$GITHUB_OUTPUT"
             echo "source=${{ steps.download_gplay.outputs.source }}" >> "$GITHUB_OUTPUT"
@@ -441,6 +464,19 @@ jobs:
             echo "::error::Trigger the workflow manually with a direct APKM URL."
             exit 1
           fi
+
+      - name: Keep original bundle for rebuilds
+        if: ${{ !inputs.apkm_url && steps.apkm_cache.outputs.cache-hit != 'true' }}
+        run: |
+          mkdir -p download-cache
+          cp "${{ steps.apkm.outputs.path }}" download-cache/original.apkm
+
+      - name: Save original bundle cache
+        if: ${{ !inputs.apkm_url && steps.apkm_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: download-cache/
+          key: apkm-original-${{ needs.check.outputs.version }}
 
       # ── Decode persistent keystore from secret (optional) ──
       - name: Set up keystore
