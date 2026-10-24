@@ -330,7 +330,7 @@ of the APK or a release. Attempts are rate-limited (one per 10 minutes). The pat
 screen shows the stored account and the last result; `scripts/set_login.sh --clear` removes it.
 
 **Settings on the TV.** F1 TV's settings page (side menu → Settings) gets an extra
-**Grand Prix Radio** button, built from F1 TV's own button layout. It opens the patch's settings
+**Custom radio** button, built from F1 TV's own button layout. It opens the patch's settings
 screen: radio on/off, automatic sync, circuit-sound matching, reset correction, automatic
 sign-in (with the stored account and device id), diagnostic logs and updates. The button is added
 at runtime by recognising the page's button ids, so no F1 TV class is hooked for it.
