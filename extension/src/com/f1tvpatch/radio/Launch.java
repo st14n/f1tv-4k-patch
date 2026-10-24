@@ -22,6 +22,11 @@ public final class Launch {
         } catch (Throwable t) {
             Log.w(RadioEngine.TAG, "F1 log setup failed", t);
         }
+        try {
+            AutoLogin.init(launcher);
+        } catch (Throwable t) {
+            Log.w(RadioEngine.TAG, "auto-login setup failed", t);
+        }
         Updater.onLaunch(launcher);
     }
 

@@ -1082,7 +1082,7 @@ def launcher_activity_path():
                 return path
     return None
 
-if True:  # always: the launch hook also carries the diagnostic-log switch
+if True:  # always: the launch hook also carries diagnostic logs and auto-login
     candidates = [p for p in (known('com/avs/f1/ui/splash/SplashActivity.smali'), launcher_activity_path()) if p is not None]
     hooked_updater = False
     for path in candidates:
@@ -1095,17 +1095,69 @@ if True:  # always: the launch hook also carries the diagnostic-log switch
 
     invoke-static {p0}, Lcom/f1tvpatch/radio/Launch;->onLaunch(Landroid/app/Activity;)V''', m.group(0), count=1)
         path.write_text(content.replace(m.group(0), method))
-        manifest_path = root / 'AndroidManifest.xml'
-        text = manifest_path.read_text()
-        permission = '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>'
-        if permission not in text:
-            text = text.replace('<uses-permission ', permission + '\n    <uses-permission ', 1)
-            manifest_path.write_text(text)
-        print(f"  Hooked {path.stem}.onCreate (in-app updater) + REQUEST_INSTALL_PACKAGES")
+        if os.environ.get('F1TV_UPDATE_REPO'):
+            manifest_path = root / 'AndroidManifest.xml'
+            text = manifest_path.read_text()
+            permission = '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>'
+            if permission not in text:
+                text = text.replace('<uses-permission ', permission + '\n    <uses-permission ', 1)
+                manifest_path.write_text(text)
+        print(f"  Hooked {path.stem}.onCreate (launch: diagnostic logs, auto-login, updater)")
         hooked_updater = True
         break
     if not hooked_updater:
         warn("no launch activity onCreate to hook; no in-app updater / diagnostic logs in this build")
+
+# ── Hook 6: F1TV's authentication states -> AutoLogin (log back in when the session is dropped) ──
+# 3.0.x: AuthenticationUseCaseImpl.onNextState(event). Otherwise: the app class that implements
+# performLogin(String, String) + performSilentLogin(), and its private one-argument method that
+# publishes the state event (calls a processor's onNext). Optional.
+AUTH_KNOWN = 'com/avs/f1/interactors/authentication/AuthenticationUseCaseImpl.smali'
+STATE_METHOD_RE = re.compile(r'^\.method private (?:final )?(\w+)\((L[^;]+;)\)V\n.*?^\.end method', re.M | re.S)
+
+def auth_state_method(text):
+    named = [m for m in STATE_METHOD_RE.finditer(text) if m.group(1) == 'onNextState']
+    if named:
+        return named[0]
+    publishers = [m for m in STATE_METHOD_RE.finditer(text) if '->onNext(Ljava/lang/Object;)V' in m.group(0)]
+    return publishers[0] if len(publishers) == 1 else None
+
+auth_path = known(AUTH_KNOWN)
+if auth_path is None or auth_state_method(auth_path.read_text()) is None:
+    found = []
+    for f in app_smali():
+        text = f.read_text()
+        if ('.method public performLogin(Ljava/lang/String;Ljava/lang/String;)V' in text
+                and '.method public performSilentLogin()V' in text and auth_state_method(text)):
+            found.append(f)
+    auth_path = found[0] if len(found) == 1 else None
+    if auth_path is not None:
+        print(f"  Authentication class found by structure: {auth_path.relative_to(root)}")
+if auth_path is not None:
+    content = auth_path.read_text()
+    m = auth_state_method(content)
+    method = m.group(0)
+    hooked, n = re.subn(r'(\.locals \d+\n)', lambda mm: mm.group(1) + '''
+    invoke-static {p0, p1}, Lcom/f1tvpatch/radio/AutoLogin;->onAuthState(Ljava/lang/Object;Ljava/lang/Object;)V
+''', method, count=1)
+    if n == 1:
+        auth_path.write_text(content.replace(method, hooked))
+        print(f"  Hooked {auth_path.stem}.{m.group(1)} (auto-login)")
+    else:
+        warn("authentication state method has no .locals; no auto-login")
+else:
+    warn("F1TV authentication class not found; no auto-login")
+
+# The adb entry point for the auto-login account (scripts/set_login.sh). Only the adb shell and the
+# system hold android.permission.DUMP, so no other app can send it.
+manifest_path = root / 'AndroidManifest.xml'
+text = manifest_path.read_text()
+if 'com.f1tvpatch.radio.LoginReceiver' not in text and '</application>' in text:
+    receiver = ('<receiver android:name="com.f1tvpatch.radio.LoginReceiver" android:exported="true" '
+                'android:permission="android.permission.DUMP">'
+                '<intent-filter><action android:name="com.f1tvpatch.SET_LOGIN"/></intent-filter></receiver>')
+    manifest_path.write_text(text.replace('</application>', receiver + '</application>', 1))
+    print("  Added LoginReceiver (adb: scripts/set_login.sh)")
 PYEOF
     ok "Custom radio hooks applied (dex is injected after rebuild)"
 else
@@ -1423,10 +1475,14 @@ if [[ -n "${F1TV_CUSTOM_AUDIO_URL:-}" ]]; then
     else
         warn "  custom radio: acoustic sync audio tap not applied (radio still syncs on the video clock)"
     fi
-    grep -rqF 'RadioSettings;->onCreatePreferences' "${DECOMPILED}"/smali*         && ok "  custom radio: settings screen" || warn "  custom radio: no settings screen entry (optional)"
-    if [[ -n "${F1TV_UPDATE_REPO:-}" ]]; then
-        grep -rqF 'Updater;->onLaunch' "${DECOMPILED}"/smali*             && ok "  in-app updater (${F1TV_UPDATE_REPO})" || warn "  in-app updater not applied (optional)"
-    fi
+    # Optional hooks: a miss only costs that feature
+    optional_marker() {   # <marker> <description>
+        if grep -rqF -- "$1" "${DECOMPILED}"/smali*; then ok "  $2"; else warn "  $2: not applied (optional)"; fi
+    }
+    optional_marker 'RadioSettings;->onCreatePreferences' 'custom radio: settings screen'
+    optional_marker 'Launch;->onLaunch' 'launch hook (diagnostic logs, in-app updater)'
+    optional_marker 'AutoLogin;->onAuthState' 'auto-login'
+    if [[ -n "${F1TV_UPDATE_REPO:-}" ]]; then ok "  in-app updater follows ${F1TV_UPDATE_REPO}"; fi
 fi
 if [[ "${F1TV_DECODER_MAX_RES:-1}" != "0" ]]; then
     verify_marker 'VideoDecoderBridgeShared.smali' '*/tiledmedia/clearvrdecoder/*' 'const-string p1, "max-width"' 'decoder max-resolution hint'
