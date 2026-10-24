@@ -5,6 +5,7 @@ import android.util.Log;
 import com.tiledmedia.clearvrplayer.TiledmediaPlayer;
 import com.tiledmedia.clearvrview.TiledmediaView;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -23,7 +24,9 @@ import java.util.Locale;
 final class HostPlayer {
     private static final String TAG = RadioEngine.TAG;
 
-    private final Object player;
+    // Weak: the radio controller holds this adapter for as long as it runs, but must never keep
+    // F1TV's player (and with it the activity) alive after F1TV is done with it.
+    private final WeakReference<Object> playerRef;
     private final Class<?> type;
 
     private Method liveMethod;
@@ -41,8 +44,19 @@ final class HostPlayer {
     private Method viewMethod;
 
     HostPlayer(Object player) {
-        this.player = player;
+        this.playerRef = new WeakReference<>(player);
         this.type = player.getClass();
+    }
+
+    /** F1TV released its player (activity gone): the controller should detach. */
+    boolean isGone() {
+        return playerRef.get() == null;
+    }
+
+    private Object player() {
+        Object p = playerRef.get();
+        if (p == null) throw new IllegalStateException("F1TV player released");
+        return p;
     }
 
     /** Whether this session is live, or null when F1TV no longer has a recognisable live check. */
@@ -52,7 +66,7 @@ final class HostPlayer {
             liveMethod = findBooleanGetter("isLiveContent", "live");
             Log.i(TAG, "host live check: " + describe(liveMethod));
         }
-        return liveMethod == null ? null : (Boolean) liveMethod.invoke(player);
+        return liveMethod == null ? null : (Boolean) liveMethod.invoke(player());
     }
 
     /** Whether the video is playing. Unknown method = assume playing. */
@@ -62,7 +76,7 @@ final class HostPlayer {
             playingMethod = findBooleanGetter("isPlaying", "playing");
             Log.i(TAG, "host playing check: " + describe(playingMethod));
         }
-        return playingMethod == null || Boolean.TRUE.equals(playingMethod.invoke(player));
+        return playingMethod == null || Boolean.TRUE.equals(playingMethod.invoke(player()));
     }
 
     /** ClearVR's player, or null when it is not created (yet). Never forces a lazy one into existence. */
@@ -90,11 +104,11 @@ final class HostPlayer {
             Log.i(TAG, "host ClearVR player: " + describe(clearVrAccessor != null ? clearVrAccessor : clearVrField));
         }
         if (clearVrAccessor != null) {
-            Object value = clearVrAccessor.invoke(null, player);
+            Object value = clearVrAccessor.invoke(null, player());
             return value instanceof TiledmediaPlayer ? (TiledmediaPlayer) value : null;
         }
         if (clearVrField != null) {
-            Object value = clearVrField.get(player);
+            Object value = clearVrField.get(player());
             if (value != null && isKotlinLazy(value.getClass())) {
                 if (!Boolean.TRUE.equals(value.getClass().getMethod("isInitialized").invoke(value))) return null;
                 value = value.getClass().getMethod("getValue").invoke(value);
@@ -119,7 +133,7 @@ final class HostPlayer {
                 if (view != null) return remember(f, null, view);
                 continue;
             }
-            Object holder = f.get(player);
+            Object holder = f.get(player());
             if (holder == null) continue;
             Method best = null;
             for (Method m : holder.getClass().getMethods()) {
@@ -145,7 +159,7 @@ final class HostPlayer {
     }
 
     private TiledmediaView viewVia(Field f, Method m) throws Exception {
-        Object value = f.get(player);
+        Object value = f.get(player());
         if (value != null && m != null) value = m.invoke(value);
         return value instanceof TiledmediaView ? (TiledmediaView) value : null;
     }

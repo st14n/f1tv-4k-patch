@@ -170,11 +170,15 @@ public final class TvSettingsEntry {
         }
         params.width = src.width;
         params.height = src.height;
+        // ConstraintLayout only applies constraints set from code after validate()
+        java.lang.reflect.Method validate = src.getClass().getMethod("validate");
+        validate.invoke(params);
         for (int i = 0; i < page.getChildCount(); i++) {
             View child = page.getChildAt(i);
             ViewGroup.LayoutParams lp = child.getLayoutParams();
             if (child != last && lp != null && lp.getClass() == src.getClass() && topToBottom.getInt(lp) == last.getId()) {
                 topToBottom.setInt(lp, newId);
+                validate.invoke(lp);
                 child.setLayoutParams(lp);
             }
         }

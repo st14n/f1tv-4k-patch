@@ -84,7 +84,8 @@ public final class RadioPatch {
     /** What the on-screen UI shows. */
     enum SyncState { OFF, NOT_LIVE, STARTING, BUFFERING, IN_SYNC, VIDEO_AHEAD, BUFFER_EXCEEDED, PAUSED, ERROR }
 
-    private final WeakReference<HostPlayer> playerRef;
+    /** Held strongly: HostPlayer itself only weakly references F1TV's player. */
+    private final HostPlayer host;
     private final WeakReference<Activity> activityRef;
     private final SharedPreferences prefs;
     private final ArrayDeque<long[]> lagSamples = new ArrayDeque<>();
@@ -116,7 +117,7 @@ public final class RadioPatch {
     private final Runnable tick = this::tick;
 
     private RadioPatch(HostPlayer player, Activity activity) {
-        playerRef = new WeakReference<>(player);
+        host = player;
         activityRef = new WeakReference<>(activity);
         prefs = activity.getSharedPreferences(PREFS, Activity.MODE_PRIVATE);
         enabled = prefs.getBoolean(KEY_ENABLED, Config.DEFAULT_ENABLED);
@@ -197,7 +198,7 @@ public final class RadioPatch {
     private void tick() {
         if (current != this) return;
         try {
-            HostPlayer player = playerRef.get();
+            HostPlayer player = host.isGone() ? null : host;
             Activity activity = activityRef.get();
             if (player == null || activity == null || activity.isFinishing()) {
                 detach();
@@ -340,7 +341,7 @@ public final class RadioPatch {
 
     private void setF1Muted(boolean mute) {
         if (!mute && !f1MutedByUs) return;
-        HostPlayer player = playerRef.get();
+        HostPlayer player = host.isGone() ? null : host;
         if (player == null) return;
         try {
             TiledmediaPlayer clearVr = player.clearVrPlayer();
