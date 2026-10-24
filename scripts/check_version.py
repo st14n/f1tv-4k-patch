@@ -30,41 +30,50 @@ def fetch_feed(retries: int = 5):
                 raise
 
 
+def _version_key(short: str) -> list[int]:
+    return [int(x) for x in short.split(".")]
+
+
 def parse_latest(xml_text: str) -> dict | None:
+    """Newest TV build in the feed.
+
+    Matches the version token itself, not the app name: F1 renames the listing now and then
+    (e.g. "F1 TV (Android TV)" -> "F1 TV: Stream F1® Live (Android TV)"). Picks the highest
+    version rather than the first item, so feed ordering does not matter either.
+    """
     root = ET.fromstring(xml_text)
-    item = root.find(".//channel/item")
-    if item is None:
-        return None
+    best = None
+    for item in root.iterfind(".//channel/item"):
+        title = item.findtext("title", "").strip()
+        link = item.findtext("link", "").strip()
+        pub_date = item.findtext("pubDate", "").strip()
 
-    title = item.findtext("title", "").strip()
-    link = item.findtext("link", "").strip()
-    pub_date = item.findtext("pubDate", "").strip()
+        # e.g. "... (Android TV) 3.0.50-SP168.9.0-release-R55-tv (arm64-v8a + arm-v7a) ..."
+        m = re.search(r"(?<![\w.])(\d+(?:\.\d+)+-\S+?-tv)\b", title, re.IGNORECASE)
+        if not m:
+            continue
+        version = m.group(1)
+        # Short version for the release tag (e.g. "3.0.50")
+        version_short = re.match(r"\d+(?:\.\d+)+", version).group(0)
 
-    # Extract version string from title
-    # e.g. "F1 TV (Android TV) 3.0.47.1-SP153.10.0-release-r51-tv ..."
-    m = re.search(r"F1 TV \(Android TV\)\s+([\d.]+-\S+?-tv)", title)
-    version = m.group(1) if m else None
+        # Derive release page URL (strip variant-specific suffix)
+        # RSS link: .../f1-tv-...-release/f1-tv-...-android-apk-download/
+        # Release page: .../f1-tv-...-release/
+        release_url = link
+        if link.count("/") > 6:
+            release_url = link.rstrip("/").rsplit("/", 1)[0] + "/"
 
-    # Short version for the release tag (e.g. "3.0.47.1")
-    m2 = re.search(r"([\d]+(?:\.[\d]+)+)", version) if version else None
-    version_short = m2.group(1) if m2 else None
-
-    # Derive release page URL (strip variant-specific suffix)
-    # RSS link: .../f1-tv-...-release/f1-tv-...-android-apk-download/
-    # Release page: .../f1-tv-...-release/
-    release_url = link
-    if link.count("/") > 6:
-        parts = link.rstrip("/").rsplit("/", 1)
-        release_url = parts[0] + "/"
-
-    return {
-        "title": title,
-        "link": link,
-        "release_url": release_url,
-        "pub_date": pub_date,
-        "version": version,
-        "version_short": version_short,
-    }
+        entry = {
+            "title": title,
+            "link": link,
+            "release_url": release_url,
+            "pub_date": pub_date,
+            "version": version,
+            "version_short": version_short,
+        }
+        if best is None or _version_key(version_short) > _version_key(best["version_short"]):
+            best = entry
+    return best
 
 
 def main():
