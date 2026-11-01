@@ -154,7 +154,7 @@ public final class RadioPatch {
     /** Called at the end of F1TV's player constructor ({@code TiledPlayer.<init>} in 3.0.x). */
     public static void onPlayerCreated(Object hostPlayer, Activity activity) {
         try {
-            if (Config.STREAM_URL.isEmpty() || hostPlayer == null || activity == null) return;
+            if (!StreamUrl.has() || hostPlayer == null || activity == null) return;
             registerLifecycle(activity);
             if (current != null) current.detach();
             MAIN.removeCallbacks(RELEASE_ENGINE);
@@ -256,7 +256,7 @@ public final class RadioPatch {
         }
         boolean videoPlaying = player.isPlaying();
         if (engine == null) {
-            engine = new RadioEngine(Config.STREAM_URL);
+            engine = new RadioEngine(StreamUrl.get());
             engine.start();
         }
 
@@ -466,6 +466,17 @@ public final class RadioPatch {
         announcedSync = false;
         prefs.edit().putBoolean(KEY_ENABLED, value).apply();
         Log.i(TAG, "radio " + (value ? "enabled" : "disabled"));
+    }
+
+    /** A different stream was chosen in the settings: drop the old one; the next tick starts the new one. */
+    static void onStreamUrlChanged() {
+        MAIN.post(() -> {
+            if (engine != null) {
+                engine.release();
+                engine = null;
+            }
+            Log.i(TAG, "radio stream changed");
+        });
     }
 
     /** Every 10 s while live: what the sync is based on, for tuning from the logs. */

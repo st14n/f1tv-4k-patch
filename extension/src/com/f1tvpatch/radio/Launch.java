@@ -17,6 +17,7 @@ public final class Launch {
     public static void onLaunch(Activity launcher) {
         try {
             Updater.loadLanguage(launcher);
+            StreamUrl.load(launcher);
             seedPrivateLogin(launcher);
         } catch (Throwable t) {
             Log.w(RadioEngine.TAG, "launch setup failed", t);

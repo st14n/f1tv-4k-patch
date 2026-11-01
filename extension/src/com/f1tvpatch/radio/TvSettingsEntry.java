@@ -110,7 +110,7 @@ public final class TvSettingsEntry {
 
     private static View build(Activity activity) {
         final Context c = activity;
-        boolean radio = !Config.STREAM_URL.isEmpty();
+        boolean radio = StreamUrl.has();
         LinearLayout card = new LinearLayout(c);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setFocusable(true);

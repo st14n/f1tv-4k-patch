@@ -121,7 +121,7 @@ public final class PatchSettingsActivity extends Activity {
         scroll.addView(list, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(scroll);
 
-        final boolean hasRadio = !Config.STREAM_URL.isEmpty();
+        final boolean hasRadio = StreamUrl.has();
         TextView heading = text(hasRadio ? "Custom radio" : t("Patch-instellingen", "Patch settings"), 30, TEXT, true);
         heading.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
         list.addView(heading);
@@ -137,8 +137,19 @@ public final class PatchSettingsActivity extends Activity {
                     14, MUTED, false));
         }
 
+        section(t("Radio", "Radio"));
+        Row url = row(t("Radio-URL", "Radio URL"));
+        url.summarySource = () -> {
+            String custom = StreamUrl.custom(this);
+            String shown = custom.isEmpty() ? StreamUrl.get() : custom;
+            String where = custom.isEmpty() ? t("(standaard van deze build)", "(this build's default)") : t("(zelf ingesteld)", "(set by you)");
+            return shown.isEmpty()
+                    ? t("Niet ingesteld. OK om een MP3/AAC-stream (Icecast of SHOUTcast) in te voeren.",
+                            "Not set. Press OK to enter an MP3/AAC stream (Icecast or SHOUTcast).")
+                    : shown + "\n" + where + t("  ·  OK om te wijzigen", "  ·  OK to change");
+        };
+        url.onClick = this::editStreamUrl;
         if (hasRadio) {
-            section(t("Radio", "Radio"));
             toggle(t("Custom radio gebruiken", "Use custom radio"), "enabled", Config.DEFAULT_ENABLED,
                     t("Vervangt het F1-commentaar bij live sessies.", "Replaces the F1 commentary in live sessions."));
             toggle(t("Automatisch synchroniseren", "Automatic sync"), "auto_sync", true,
@@ -197,6 +208,33 @@ public final class PatchSettingsActivity extends Activity {
 
         refreshAll();
         if (!rows.isEmpty()) rows.get(0).view.requestFocus();
+    }
+
+    /** Dialog with an on-screen keyboard; an empty value goes back to the build's stream. */
+    private void editStreamUrl() {
+        final android.widget.EditText input = new android.widget.EditText(this);
+        input.setSingleLine(true);
+        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+        input.setText(StreamUrl.custom(this).isEmpty() ? StreamUrl.get() : StreamUrl.custom(this));
+        input.setSelection(input.getText().length());
+        input.setHint("https://...");
+        new android.app.AlertDialog.Builder(this)
+                .setTitle(t("Radio-URL", "Radio URL"))
+                .setMessage(t("Direct MP3/AAC-stream (Icecast/SHOUTcast). Je bent zelf verantwoordelijk voor de stream en de rechten ervan. Leeg laten = standaard van deze build.",
+                        "Direct MP3/AAC stream (Icecast/SHOUTcast). You are responsible for the stream and the rights to it. Empty = this build's default."))
+                .setView(input)
+                .setPositiveButton(t("Opslaan", "Save"), (d, w) -> {
+                    String value = input.getText().toString().trim();
+                    if (!value.isEmpty() && !StreamUrl.isValid(value)) {
+                        android.widget.Toast.makeText(this, t("Geen geldige http(s)-URL.", "Not a valid http(s) URL."),
+                                android.widget.Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    StreamUrl.set(this, value);
+                    recreate();
+                })
+                .setNegativeButton(t("Annuleren", "Cancel"), null)
+                .show();
     }
 
     @Override
