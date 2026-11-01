@@ -6,20 +6,20 @@ Automated pipeline that patches the F1TV Android TV app to enable UHD/4K playbac
 
 1. **Checks** APKPure every 3 hours for new F1TV Android TV releases
 2. **Downloads** the app bundle — Google Play primary (arm64 native via NVIDIA Shield profile), APKPure and APKMirror as fallbacks
-3. **Patches** the smali to unlock 4K on any device (UHD/device whitelist bypass, the 1.5× display-size cap, the HDR-capability gate that unlocks the 2160p tier, and decoder/render tweaks — see [Applied patches](#applied-patches))
+3. **Patches** the smali so the app uses UHD/4K on devices that support it but are not on F1's device list (device-list override, the 1.5× display-size limit, the HDR-capability check that gates the 2160p tier, and decoder/render tweaks — see [Applied patches](#applied-patches)). Your subscription, F1's servers and the DRM are not touched: F1 still decides what your account may watch.
 4. **Signs** all APKs with a consistent keystore
 5. **Publishes** the patched bundle as a GitHub Release
 6. **Notifies** via Pushover when a new patch is ready (or if it fails)
 
-> **How 4K gets unlocked (and why stock skips the Shield).** F1TV picks a stream manifest from
+> **How 4K gets enabled (and why stock skips the Shield).** F1TV picks a stream manifest from
 > the `x-f1-device-info` header. The Android app sends `device=android_tv`, which returns the
 > Widevine `HDR-UHD-CMAF-WV` manifest where **2160p exists only as HDR; SDR is hard-capped at
 > 1620p server-side**. ClearVR only requests the 2160p tier if the content's HDR type is in
 > *both* what the EGL renderer supports *and* what the display reports
 > (`Display.getHdrCapabilities()`). F1's UHD is **HLG**; a panel that reports only HDR10 (like
 > most setups behind an NVIDIA Shield) makes ClearVR reject HLG upstream and fall back to
-> 1620p SDR. The pipeline forces the EGL HDR advertise **and** spoofs the display-capability
-> check, so the core serves the 2160p tiles. How those HLG tiles are then rendered is decided
+> 1620p SDR. The pipeline overrides the EGL HDR report **and** the display-capability
+> check, so the core requests the 2160p tiles. How those HLG tiles are then rendered is decided
 > **per device at runtime** from the GPU's real EGL colorspace support: a native HLG surface
 > where the GPU has it (Homatics, Mi Box, most HLG TVs — full HDR, untouched colours), an
 > HLG→PQ reroute where only the PQ colorspace exists (NVIDIA Shield — accurate 4K), and the
@@ -240,18 +240,18 @@ If you're stuck at 1620p, check in order:
 ## Applied patches
 
 All patches are applied to every device (no runtime device gating) unless noted. The two that
-actually unlock 2160p are **HDR advertise** and **display-capability spoof**.
+actually unlock 2160p are **HDR advertise** and the **display-capability override**.
 
 | Patch | File · method | What it does |
 |---|---|---|
-| UHD / device unlock | `DeviceSupportImpl` · `validateIsUhdSupportedDevice`, `validateTmSdkSupport`, `validateLowRamDeviceSupport`, `validateApiLevelSupport` | Each returns `Pair(true, null)`, so the device passes every UHD-capability gate (brand/product whitelist, secure-decoder probe, low-RAM check, API-level check). |
-| **Display-capability spoof** *(2160p unlock)* | `DeviceParameters` · `doesDisplaySupport` | Returns `true` so the core believes the panel accepts F1's HLG and serves the **2160p tiles** instead of rejecting HLG upstream and dropping to 1620p SDR. Default on; disable with `F1TV_DISPLAY_HDR_SPOOF=0`. |
-| **HDR advertise** *(2160p unlock)* | `EGLRenderTarget` · `getIsBt2020HlgExtensionSupported` | Returns `true`, so `DeviceParameters` reports PQ+HLG EGL support and the backend offers the HDR 2160p tier. The stock probe is kept as `uhdRealHlgSupported()`, plus a raw PQ probe `uhdRealPqSupported()` (no API-33 gate, which wrongly excluded the Shield on Android 11); the two patches below use those real answers. Default on; disable with `F1TV_HLG_BYPASS=0`. |
+| UHD / device-list override | `DeviceSupportImpl` · `validateIsUhdSupportedDevice`, `validateTmSdkSupport`, `validateLowRamDeviceSupport`, `validateApiLevelSupport` | Each returns `Pair(true, null)`, so the device passes every UHD-capability check (brand/product list, secure-decoder probe, low-RAM check, API-level check). |
+| **Display-capability override** *(enables 2160p)* | `DeviceParameters` · `doesDisplaySupport` | Returns `true` so the core believes the panel accepts F1's HLG and serves the **2160p tiles** instead of rejecting HLG upstream and dropping to 1620p SDR. Default on; disable with `F1TV_DISPLAY_HDR_SPOOF=0`. |
+| **HDR advertise** *(enables 2160p)* | `EGLRenderTarget` · `getIsBt2020HlgExtensionSupported` | Returns `true`, so `DeviceParameters` reports PQ+HLG EGL support and the backend offers the HDR 2160p tier. The stock probe is kept as `uhdRealHlgSupported()`, plus a raw PQ probe `uhdRealPqSupported()` (no API-33 gate, which wrongly excluded the Shield on Android 11); the two patches below use those real answers. Default on; disable with `F1TV_HLG_BYPASS=0`. |
 | Quality selector | `DiagnosticsPreferenceManagerImpl` · `isVideoQualityEnabled` | Returns `true` so the in-app quality picker is visible. (The debug overlays are intentionally left off.) |
-| 4K display size | `TrueTVDisplaySizeHelper` · `getDefaultDisplaySize` | Hardcodes a `3840×2160` panel via `getTrueDisplaySizeIfTV`, lifting ClearVR's ~1.5× display-size cap (which otherwise limits a 1080p UI surface to `2880×1620`). |
+| 4K display size | `TrueTVDisplaySizeHelper` · `getDefaultDisplaySize` | Hardcodes a `3840×2160` panel via `getTrueDisplaySizeIfTV`, lifting ClearVR's ~1.5× display-size limit (which otherwise limits a 1080p UI surface to `2880×1620`). |
 | Runtime HLG/PQ render path *(correct colours everywhere)* | `RenderTargetConfig` · `requireHLG`, `require2020PQ` | `requireHLG → HLG && uhdRealHlgSupported()`, `require2020PQ → PQ ‖ (HLG && !uhdRealHlgSupported())`. GPUs with the HLG colorspace get a **native HLG surface** (full HDR, no colour shift — fixes the dark/crushed picture of the old unconditional reroute, #20); GPUs with only PQ (NVIDIA Shield) get the **HLG→PQ reroute** that gives accurate 4K there. SDR content untouched. |
 | Surface HDR capability *(SDK ≥ SP164 / F1TV 3.0.49+)* | `TMViewModel` · `getDisplayObjectMappings` | Reports the GL surface as HLG-capable only when it really is (`uhdSurfaceHlgRenderable()` = real HLG **or** real PQ). Devices with neither colorspace (MediaTek / Amlogic TVs) are no longer pushed onto the GL HDR path, which failed or stuttered there (TM4014 / HDR flicker, #5 #11 #17); the core routes them to its direct decoder→view path instead. Older SDKs have no such call and are skipped. |
-| Decoder capability spoof | `DecoderCapability` · `getAsCoreProtobuf` | Reports non-zero secure tile slots/rows/cols (16/5/5) so the backend serves the full-resolution tile tier instead of a reduced one. |
+| Decoder capability override | `DecoderCapability` · `getAsCoreProtobuf` | Reports non-zero secure tile slots/rows/cols (16/5/5) so the backend serves the full-resolution tile tier instead of a reduced one. |
 | Decoder max-resolution hint | `VideoDecoderBridgeShared` · `getMediaFormat` | Adds `max-width`/`max-height` (the decoder's largest supported resolution) to the decoder format. ClearVR configures the decoder at the first tile size (e.g. 960x544) and relies on a mid-stream reallocation when the stream ramps to 3840x2176; MediaTek decoders fail that reallocation (`acquireVdecResource … not enough` → TM4014, #5 #11 #17). Default on; disable with `F1TV_DECODER_MAX_RES=0`. |
 | NVIDIA workaround off | `Quirks` · `deviceNeedsNoPostProcessWorkaround` | Returns `false` so the decoder isn't forced into a lower-quality no-post-process path on NVIDIA devices. |
 | Version tag | `apktool.yml`, `BuildConfig` | Appends `-UHD` to the version name so patched builds are identifiable. |
@@ -261,7 +261,7 @@ actually unlock 2160p are **HDR advertise** and **display-capability spoof**.
 > Removed in this release: the *"device-model spoof"* (`model=chromecast`). It patched the first
 > `Build.MODEL` read in `TvApplication`, which sits in `getDeviceType()` (the Amazon Fire-Stick
 > check), not in `getRequestHeader()` — the header always carried the real model, and the only
-> effect was mis-detecting Amazon devices. The UHD whitelist is bypassed client-side anyway. Also
+> effect was mis-detecting Amazon devices. The UHD device list is overridden client-side anyway. Also
 > removed: the opt-in `F1TV_DIRECT_TO_VIEW` / `F1TV_PQ_REROUTE` build flags — the render path is
 > now chosen per device at runtime (and the SDK in F1TV 3.0.49+ no longer has the app-level
 > blit-mode switch the old flag patched).
@@ -273,9 +273,9 @@ actually unlock 2160p are **HDR advertise** and **display-capability spoof**.
 | Variable | Default | Effect |
 |---|---|---|
 | `F1TV_UNIVERSAL_APK` | `1` | Also output `f1tv-patched-universal.apk`: every split in the bundle merged into one APK (installs with `adb install -r`, a file manager, or an updater app such as [Obtainium](https://github.com/ImranR98/Obtainium) watching your fork's releases). Needs `APKEDITOR_JAR` pointing at an [APKEditor](https://github.com/REAndroid/APKEditor) jar (CI downloads it). Only contains the ABIs the source bundle had — Google Play source gives arm64 + armeabi-v7a, APKPure only armeabi-v7a. |
-| `F1TV_UHD_PATCHES` | `1` | Master switch. `0` skips **all** UHD unlock/spoof and render-path patches (everything in the table above except the quality selector and version tag), leaving playback exactly as shipped — for devices the stock app already serves UHD to, e.g. to add only the custom radio. Version tag becomes `-RADIO`. |
+| `F1TV_UHD_PATCHES` | `1` | Master switch. `0` skips **all** UHD/capability-override and render-path patches (everything in the table above except the quality selector and version tag), leaving playback exactly as shipped — for devices the stock app already serves UHD to, e.g. to add only the custom radio. Version tag becomes `-RADIO`. |
 | `F1TV_HLG_BYPASS` | `1` | Advertise EGL HDR (PQ+HLG) so the backend offers the 2160p tier, and install the runtime HLG/PQ render-path patches. Required for 4K. |
-| `F1TV_DISPLAY_HDR_SPOOF` | `1` | Force the display-capability check to accept all HDR types so the core serves 2160p on HDR10-only panels. Required for 4K on the Shield. |
+| `F1TV_DISPLAY_HDR_SPOOF` | `1` | Let the display-capability check accept all HDR types so the core requests 2160p on HDR10-only panels. Required for 4K on the Shield. |
 | `F1TV_DECODER_MAX_RES` | `1` | Tell the video decoder up front how large the stream can get (adaptive-playback hint) so the 2160p ramp needs no mid-stream decoder reallocation. |
 | `F1TV_DEBUG_LOGS` | `0` | Set `1` to route the ClearVR SDK log (INFO level) to logcat under the tag `ClearVR`, and make the native core write its own log to `/sdcard/Android/data/com.formulaone.production/files/clearvr.tmlog`; the stock app silences both. CI turns this on for every non-`main` branch, so **dev pre-releases log (`-UHD-dbg`) and `main` releases don't**. `scripts/capture_logs.sh` collects both. |
 
@@ -379,4 +379,4 @@ APK.
 
 ## License
 
-For personal/educational use only.
+The original work in this fork (custom radio extension, radio/variant build changes) is under the ST14N source-available license, see [LICENSE](LICENSE). Upstream parts keep the upstream terms (personal/educational use only). The F1 TV app itself belongs to Formula One and its licensors; this is an unofficial project, not affiliated with or endorsed by Formula 1, F1 TV, Tiledmedia or Grand Prix Radio, and you need your own F1 TV subscription. Using a modified client may be against the F1 TV terms of use; use at your own risk. The Grand Prix Radio stream is a third-party service, not owned or endorsed here. Rights holders: open an issue and it will be handled promptly.

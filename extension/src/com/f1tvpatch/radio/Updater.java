@@ -256,13 +256,16 @@ public final class Updater {
             JSONArray assets = json.optJSONArray("assets");
             String apkUrl = null;
             long size = 0L;
-            // Two variants share a release: with the radio (...-universal.apk) and without
-            // (...-noradio-universal.apk); a build only updates to its own kind.
+            // Three variants share a release: UHD + radio (...-universal.apk), radio only without the
+            // UHD patches (...-radioonly-universal.apk) and no radio (...-noradio-universal.apk);
+            // a build only updates to its own kind.
             boolean wantNoRadio = Config.STREAM_URL.isEmpty();
+            boolean wantRadioOnly = !wantNoRadio && !Config.UHD_PATCHES;
             for (int i = 0; assets != null && i < assets.length(); i++) {
                 JSONObject asset = assets.getJSONObject(i);
                 String name = asset.optString("name", "");
-                if (name.endsWith("-universal.apk") && name.contains("noradio") == wantNoRadio) {
+                if (name.endsWith("-universal.apk") && name.contains("noradio") == wantNoRadio
+                        && name.contains("radioonly") == wantRadioOnly) {
                     apkUrl = asset.optString("browser_download_url", null);
                     size = asset.optLong("size", 0L);
                 }

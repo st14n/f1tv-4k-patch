@@ -1,0 +1,80 @@
+ST14N SOURCE-AVAILABLE LICENSE (v1.0)
+
+Copyright (c) 2026 st14n. All rights reserved except as granted below.
+
+1. SCOPE
+   These terms apply only to the original work of st14n in this repository
+   ("the Work"): the changes, additions and new files authored by st14n.
+   They do not apply to, and do not restrict, code written by others
+   (see "Upstream components" below), nor to any third-party content.
+
+2. GRANT
+   You may, for personal, non-commercial purposes:
+   a) use and run the Work;
+   b) study, copy and modify the Work;
+   c) share the Work or your modified versions, provided that you keep this
+      license and all copyright notices, and clearly mark your changes and
+      that your version is not the original.
+
+3. RESTRICTIONS
+   You may not:
+   a) sell, rent, sublicense or otherwise use the Work commercially, or
+      include it in a paid product or service, without written permission;
+   b) use the Work, or anything derived from it, to circumvent, disable or
+      weaken any technical protection measure (including DRM such as
+      Widevine), or to obtain access to content you are not entitled to;
+   c) remove or hide the notices in sections 2(c) and 6;
+   d) present the Work or your version as official, or as endorsed by or
+      affiliated with st14n, Formula 1 or any other third party.
+
+4. THIRD-PARTY RIGHTS AND CONTENT (no rights granted)
+   "F1", "Formula 1", "F1 TV", "Tiledmedia", "ClearVR", "Widevine" and
+   "Grand Prix Radio" are names and/or trademarks of their respective
+   owners; this project is unofficial and not affiliated with or endorsed by
+   any of them. This license grants no right in the F1 TV app, F1 content,
+   streams, DRM, trademarks, or in any radio stream or other third-party
+   service. Those remain subject to their owners' own terms. You need your
+   own valid F1 TV subscription and are solely responsible for complying
+   with the terms of F1 TV and of every stream you use or configure.
+
+5. UPSTREAM COMPONENTS
+   Parts of this repository originate from other authors and stay under their
+   own license or terms, which are not changed by this file.
+
+6. NO WARRANTY; LIMITATION OF LIABILITY
+   THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
+   TO THE FULLEST EXTENT PERMITTED BY LAW, ST14N IS NOT LIABLE FOR ANY CLAIM
+   OR DAMAGES (INCLUDING ACCOUNT SUSPENSION, LOSS OF SERVICE OR DATA) ARISING
+   FROM THE WORK OR ITS USE. YOU USE IT AT YOUR OWN RISK.
+
+7. TERMINATION AND TAKEDOWN
+   These rights end automatically if you breach this license. Rights holders
+   who object to anything in this repository can open an issue or contact
+   the owner; valid claims will be handled promptly, and the owner may remove
+   content or releases at any time.
+
+8. GENERAL
+   If a provision is unenforceable, the rest remains in force. Dutch law
+   applies; the courts of the Netherlands have jurisdiction, without
+   prejudice to mandatory consumer law.
+
+
+======================================================================
+UPSTREAM COMPONENTS
+======================================================================
+
+The patch pipeline and patch scripts that originate from the upstream
+project (Alexvbp/f1tv-4k-patch and its contributors) stay under that
+project's own terms (its README states: "For personal/educational use
+only"). The ST14N license above covers only the original work of st14n,
+in particular the custom radio extension (extension/src/com/f1tvpatch/radio/)
+and the radio/variant changes to the build pipeline.
+
+THE F1 TV APP
+
+The F1 TV app (com.formulaone.production) and everything inside it belongs
+to Formula One and its licensors. Patched builds published from this
+repository are provided only to let owners of a valid F1 TV subscription
+use their own copy on their own devices; they are not licensed by, and
+carry no rights from, the owner of the app.

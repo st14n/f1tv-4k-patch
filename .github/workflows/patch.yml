@@ -501,6 +501,16 @@ jobs:
           # Second variant for the same release: everything except the custom radio and its URL
           # (sign-in, device id, updater, settings). The in-app updater keeps each install on its own
           # variant by asset name. Set the repo variable F1TV_BUILD_NORADIO=0 to skip it.
+          # Radio-only variant: the custom radio on F1's stock playback, without any UHD /
+          # capability-override patch. For people who only want the radio.
+          if [[ -n "${F1TV_CUSTOM_AUDIO_URL}" && "${F1TV_BUILD_RADIOONLY}" != "0" ]]; then
+            F1TV_UHD_PATCHES=0 bash scripts/patch.sh "${{ steps.apkm.outputs.path }}" output-radioonly/
+            if [[ -f output-radioonly/f1tv-patched-universal.apk ]]; then
+              cp output-radioonly/f1tv-patched-universal.apk output/f1tv-patched-radioonly-universal.apk
+            fi
+            cp output-radioonly/f1tv-uhd-patched.apkm output/f1tv-patched-radioonly.apkm
+          fi
+
           if [[ -n "${F1TV_CUSTOM_AUDIO_URL}" && "${F1TV_BUILD_NORADIO}" != "0" ]]; then
             F1TV_CUSTOM_AUDIO_URL="" F1TV_EXTENSION=1 bash scripts/patch.sh "${{ steps.apkm.outputs.path }}" output-noradio/
             if [[ -f output-noradio/f1tv-patched-universal.apk ]]; then
@@ -509,7 +519,7 @@ jobs:
             cp output-noradio/f1tv-uhd-patched.apkm output/f1tv-uhd-patched-noradio.apkm
           fi
         env:
-          # Unlock the 2160p tier. Both default on in patch.sh; set explicitly
+          # Enable the 2160p tier. Both default on in patch.sh; set explicitly
           # here for clarity. The HDR render path (native HLG, PQ reroute, or
           # the core's direct path) is chosen per device at runtime — see the
           # README "Applied patches" table.
@@ -518,7 +528,7 @@ jobs:
           # Non-main (dev) builds route the ClearVR player log to logcat so
           # scripts/capture_logs.sh shows what the player decided.
           F1TV_DEBUG_LOGS: ${{ github.ref_name != 'main' && '1' || '0' }}
-          # Repo variable F1TV_UHD_PATCHES=0 skips all UHD unlock/spoof patches (stock playback).
+          # Repo variable F1TV_UHD_PATCHES=0 skips all UHD capability-override patches (stock playback).
           F1TV_UHD_PATCHES: ${{ vars.F1TV_UHD_PATCHES || '1' }}
           # Optional custom radio audio (README: "Custom radio audio"). Empty = off.
           # Note: the URL ends up inside the published APK.
@@ -531,6 +541,7 @@ jobs:
           F1TV_UPDATE_REPO: ${{ (vars.F1TV_SELF_UPDATE || '1') != '0' && github.repository || '' }}
           F1TV_BUILD_RUN: ${{ github.run_id }}
           F1TV_BUILD_NORADIO: ${{ vars.F1TV_BUILD_NORADIO || '1' }}
+          F1TV_BUILD_RADIOONLY: ${{ vars.F1TV_BUILD_RADIOONLY || '1' }}
           KEYSTORE_PATH: ${{ env.KEYSTORE_PATH || '' }}
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'android' }}
           KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS || 'f1tvpatch' }}
@@ -583,7 +594,7 @@ jobs:
             --target "${BRANCH}" \
             ${PRERELEASE_FLAG} \
             --notes "$(cat <<NOTES
-          Patched F1TV Android TV app with UHD/4K enabled.
+          Patched F1TV Android TV app. The UHD/4K compatibility patch lets the app use the UHD streams on devices that support them but are not on F1's device list; your subscription, F1's servers and the DRM are unchanged.
 
           **Version:** \`${{ needs.check.outputs.version }}\`
           **Branch:** \`${BRANCH}\`
@@ -591,9 +602,14 @@ jobs:
 
           ## Install
 
-          Two variants: \`f1tv-patched-universal.apk\` has the custom radio built in,
-          \`f1tv-patched-noradio-universal.apk\` is the same without the radio (and without its stream
-          URL). The in-app updater keeps each install on its own variant.
+          Pick one variant (they cannot be installed side by side; the in-app updater keeps each install
+          on its own variant):
+
+          | Variant | Universal APK | Split bundle | What it is |
+          |---|---|---|---|
+          | **UHD + radio** | \`f1tv-patched-universal.apk\` | \`f1tv-uhd-patched.apkm\` | UHD/4K compatibility patch and the Grand Prix Radio |
+          | **Radio only** | \`f1tv-patched-radioonly-universal.apk\` | \`f1tv-patched-radioonly.apkm\` | Stock F1 playback plus the Grand Prix Radio, no UHD compatibility patches |
+          | **No radio** | \`f1tv-patched-noradio-universal.apk\` | \`f1tv-uhd-patched-noradio.apkm\` | UHD/4K compatibility patch only, no radio |
 
           **Easiest:** download \`f1tv-patched-universal.apk\` (all CPU types in one file) and install it
           with \`adb install -r f1tv-patched-universal.apk\`, a file manager, or an updater app such as Obtainium.
@@ -604,13 +620,22 @@ jobs:
           ./scripts/install.sh f1tv-uhd-patched.apkm [device-ip:5555]
           \`\`\`
 
+          ## Notice
+
+          Unofficial, independent project; not affiliated with or endorsed by Formula 1, F1 TV, Tiledmedia
+          or Grand Prix Radio. All trademarks belong to their owners. You need your own valid F1 TV
+          subscription; this build does not provide any content or access. Using a modified client can be
+          against the F1 TV terms of use: use at your own risk. The Grand Prix Radio stream is a third-party
+          service and is not owned, hosted or endorsed here. See the repository LICENSE. Rights holders:
+          open an issue and it will be handled promptly.
+
           See the [README](https://github.com/${{ github.repository }}#installing-on-your-android-tv) for full setup instructions.
 
           <sub>run:${{ github.run_id }}</sub>
           NOTES
           )" \
             output/f1tv-uhd-patched.apkm \
-            $(ls output/f1tv-patched-universal.apk output/f1tv-patched-noradio-universal.apk output/f1tv-uhd-patched-noradio.apkm 2>/dev/null)
+            $(ls output/f1tv-patched-universal.apk output/f1tv-patched-radioonly-universal.apk output/f1tv-patched-radioonly.apkm output/f1tv-patched-noradio-universal.apk output/f1tv-uhd-patched-noradio.apkm 2>/dev/null)
 
           echo "release_url=https://github.com/${{ github.repository }}/releases/tag/${TAG}" >> "$GITHUB_OUTPUT"
         env:

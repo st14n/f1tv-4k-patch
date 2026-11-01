@@ -43,6 +43,8 @@ for v in "${UPDATE_REPO}" "${RELEASE_TAG}" "${BUILD_RUN}"; do
     [[ "${v}" =~ ^[A-Za-z0-9._/-]*$ ]] || { echo "F1TV_UPDATE_REPO/RELEASE_TAG/BUILD_RUN may only use [A-Za-z0-9._/-]" >&2; exit 1; }
 done
 [[ "${F1TV_CUSTOM_AUDIO_ENABLED:-1}" == "0" ]] && ENABLED=false
+UHD_PATCHES=true
+[[ "${F1TV_UHD_PATCHES:-1}" == "0" ]] && UHD_PATCHES=false
 DEBUG_LOGS=false
 [[ "${F1TV_DEBUG_LOGS:-0}" == "1" ]] && DEBUG_LOGS=true
 
@@ -70,6 +72,8 @@ final class Config {
     static final String UPDATE_REPO = "${UPDATE_REPO}";
     static final String RELEASE_TAG = "${RELEASE_TAG}";
     static final String BUILD_RUN = "${BUILD_RUN}";
+    // Whether the UHD unlock patches are in this build (picks which release asset the updater follows)
+    static final boolean UHD_PATCHES = ${UHD_PATCHES};
     // F1TV's own Timber logs to logcat from launch (also switchable in the settings screen)
     static final boolean DEBUG_LOGS = ${DEBUG_LOGS};
 
