@@ -363,16 +363,29 @@ absorbs the radio's own broadcast latency, so you calibrate it once per station.
 buffered (up to 150 s); until enough is buffered — and whenever it can't cover the moment you're
 watching — you hear the normal F1 audio. Replays/VOD always use the F1 audio.
 
-**On the TV** (during playback) press **MENU** or a **colour key**, or **long-press OK**:
+**On the TV (live sessions).** While the radio is on, a **Custom radio bar** appears together with
+F1's own playback controls, with the sync status and the current correction. To get at it:
 
-| Key | Action |
+- press **MENU** or a **colour key** on the remote, or **long-press OK**, to show the bar on demand;
+- or press **▲** at the top of F1's controls to move focus into the bar.
+
+| In the bar | Action |
 |---|---|
-| ◀ / ▶ | Radio 0.25 s earlier / later |
-| ▼ / ▲ | Radio 1 s earlier / later |
-| OK | Radio on/off |
-| BACK | Close |
+| ◀ **More** / **Less** ▶ | Radio 0.25 s later / earlier (each press; with automatic sync it moves the remembered correction) |
+| **Radio: on/off** | Switch between the radio and the F1 commentary |
+| **Sync again** | Redo the automatic sync now |
+| **More options** | Open the full panel |
+| BACK or ▼ | Leave the bar |
 
-Settings are remembered. Logs: `adb logcat -s F1Radio`.
+The panel shows the sync status and a lag timeline, the same 0.25 s nudge buttons, **Automatic
+sync** and **Match to circuit sound** switches (a manual nudge pauses the circuit-sound matching
+until you resume it), radio on/off, **Reconnect radio**, **Sync again** and **Close**. BACK or MENU
+closes it, and it closes by itself after 25 s without input. Without automatic sync the nudges set
+a fixed delay instead.
+
+The same options, plus sign-in, diagnostic logs, language and updates, are in F1 TV's own
+*Settings → Custom radio*. The radio bar and settings are in Dutch or English (follows the TV's
+language, or choose in the settings). Settings are remembered. Logs: `adb logcat -s F1Radio`.
 
 The player code is in [`extension/`](extension/) (plain Java, platform APIs only) and is compiled
 by `patch.sh` into an extra `classesN.dex`; it needs an Android SDK (`ANDROID_HOME` with a
