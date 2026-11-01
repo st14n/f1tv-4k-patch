@@ -175,7 +175,7 @@ public final class PatchSettingsActivity extends Activity {
         if (Updater.isConfigured()) {
             section(t("Updates", "Updates"));
             toggle(t("Automatisch op updates controleren", "Check for updates automatically"), Updater.KEY_AUTO_UPDATE, true,
-                    t("Bij het openen van de app, hoogstens elke 6 uur.", "When the app opens, at most every 6 hours."));
+                    t("Bij elke start van de app, met melding tot je installeert.", "Every time the app opens, with a prompt until you install."));
             Row check = row(t("Nu op updates controleren", "Check for updates now"));
             check.summarySource = () -> t("Geïnstalleerd: ", "Installed: ") + Updater.currentVersionLabel();
             check.onClick = () -> Updater.check(this, true);
