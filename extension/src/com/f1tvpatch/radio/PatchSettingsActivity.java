@@ -154,6 +154,20 @@ public final class PatchSettingsActivity extends Activity {
             correction.onClick = () -> Updater.prefs(this).edit().putLong("adjust_ms", Config.DEFAULT_ADJUST_MS).apply();
         }
 
+        section(t("Taal", "Language"));
+        Row language = row(t("Taal van de patch", "Patch language"));
+        language.summarySource = () -> {
+            String current = Updater.getLanguage();
+            return ("nl".equals(current) ? "Nederlands" : "en".equals(current) ? "English"
+                    : t("Automatisch (taal van de TV)", "Automatic (TV language)"))
+                    + t("  ·  OK om te wisselen", "  ·  OK to change");
+        };
+        language.onClick = () -> {
+            String current = Updater.getLanguage();
+            Updater.setLanguage(this, "auto".equals(current) ? "nl" : "nl".equals(current) ? "en" : "auto");
+            recreate();
+        };
+
         section(t("Inloggen", "Sign-in"));
         Row autoLogin = toggle(t("Automatisch opnieuw inloggen", "Sign in again automatically"), AutoLogin.KEY_ENABLED, true, null);
         autoLogin.summarySource = () -> {

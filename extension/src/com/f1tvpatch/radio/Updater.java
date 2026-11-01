@@ -440,7 +440,28 @@ public final class Updater {
         Toast.makeText(context, text, Toast.LENGTH_LONG).show();
     }
 
+    static final String KEY_LANGUAGE = "language";
+    /** "auto" (system language), "nl" or "en"; set at launch and from the settings screen. */
+    private static volatile String language = Config.DEFAULT_LANGUAGE;
+
+    static void loadLanguage(Context c) {
+        SharedPreferences prefs = prefs(c);
+        if (!prefs.contains(KEY_LANGUAGE) && !"auto".equals(Config.DEFAULT_LANGUAGE)) {
+            // Keep the build's language across updates to builds that default to "auto"
+            prefs.edit().putString(KEY_LANGUAGE, Config.DEFAULT_LANGUAGE).apply();
+        }
+        language = prefs.getString(KEY_LANGUAGE, Config.DEFAULT_LANGUAGE);
+    }
+
+    static String getLanguage() { return language; }
+
+    static void setLanguage(Context c, String value) {
+        language = value;
+        prefs(c).edit().putString(KEY_LANGUAGE, value).apply();
+    }
+
     static String t(String nl, String en) {
-        return "nl".equals(Locale.getDefault().getLanguage()) ? nl : en;
+        boolean dutch = "nl".equals(language) || ("auto".equals(language) && "nl".equals(Locale.getDefault().getLanguage()));
+        return dutch ? nl : en;
     }
 }

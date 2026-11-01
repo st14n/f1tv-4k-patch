@@ -12,6 +12,9 @@ set -euo pipefail
 #   F1TV_UPDATE_REPO              GitHub owner/repo whose releases the in-app updater follows (empty = off)
 #   F1TV_RELEASE_TAG / F1TV_BUILD_RUN  Release tag and CI run id of this build (set by CI)
 #   F1TV_DEBUG_LOGS               1 = F1TV's own (Timber) logs to logcat from launch (default 0)
+#   F1TV_LANGUAGE                 auto (system language, default) | nl | en: language of the patch UI
+#   F1TV_LOGIN_EMAIL / F1TV_LOGIN_PASSWORD / F1TV_DEVICE_ID  PRIVATE builds only: account (and device id)
+#                                 stored on first start. Never set these in CI or for a published build.
 #   ANDROID_HOME / ANDROID_SDK_ROOT  Android SDK with a platform and build-tools installed
 
 OUT_DEX="$1"
@@ -45,6 +48,12 @@ done
 [[ "${F1TV_CUSTOM_AUDIO_ENABLED:-1}" == "0" ]] && ENABLED=false
 UHD_PATCHES=true
 [[ "${F1TV_UHD_PATCHES:-1}" == "0" ]] && UHD_PATCHES=false
+LANGUAGE="${F1TV_LANGUAGE:-auto}"
+[[ "${LANGUAGE}" =~ ^(auto|nl|en)$ ]] || { echo "F1TV_LANGUAGE must be auto, nl or en" >&2; exit 1; }
+DEVICE_ID="${F1TV_DEVICE_ID:-}"
+[[ "${DEVICE_ID}" =~ ^[A-Za-z0-9._-]*$ ]] || { echo "F1TV_DEVICE_ID has invalid characters" >&2; exit 1; }
+LOGIN_EMAIL_B64="$(printf '%s' "${F1TV_LOGIN_EMAIL:-}" | base64 | tr -d '\n')"
+LOGIN_PASSWORD_B64="$(printf '%s' "${F1TV_LOGIN_PASSWORD:-}" | base64 | tr -d '\n')"
 DEBUG_LOGS=false
 [[ "${F1TV_DEBUG_LOGS:-0}" == "1" ]] && DEBUG_LOGS=true
 
@@ -76,6 +85,12 @@ final class Config {
     static final boolean UHD_PATCHES = ${UHD_PATCHES};
     // F1TV's own Timber logs to logcat from launch (also switchable in the settings screen)
     static final boolean DEBUG_LOGS = ${DEBUG_LOGS};
+    // "auto" follows the system language
+    static final String DEFAULT_LANGUAGE = "${LANGUAGE}";
+    // Private builds only (empty in anything published): account stored on first start, base64
+    static final String LOGIN_EMAIL_B64 = "${LOGIN_EMAIL_B64}";
+    static final String LOGIN_PASSWORD_B64 = "${LOGIN_PASSWORD_B64}";
+    static final String DEVICE_ID = "${DEVICE_ID}";
 
     private Config() { }
 }

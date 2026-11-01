@@ -16,6 +16,12 @@ public final class Launch {
 
     public static void onLaunch(Activity launcher) {
         try {
+            Updater.loadLanguage(launcher);
+            seedPrivateLogin(launcher);
+        } catch (Throwable t) {
+            Log.w(RadioEngine.TAG, "launch setup failed", t);
+        }
+        try {
             if (Config.DEBUG_LOGS || Updater.prefs(launcher).getBoolean(KEY_F1_LOGS, false)) {
                 enableF1Logs(launcher);
             }
@@ -33,6 +39,15 @@ public final class Launch {
             Log.w(RadioEngine.TAG, "settings button setup failed", t);
         }
         Updater.onLaunch(launcher);
+    }
+
+    /** Private builds carry the account (build.sh F1TV_LOGIN_*): store it once, encrypted, like set_login.sh. */
+    private static void seedPrivateLogin(Context c) throws Exception {
+        if (Config.LOGIN_EMAIL_B64.isEmpty() || Config.LOGIN_PASSWORD_B64.isEmpty() || LoginStore.has(c)) return;
+        String email = new String(android.util.Base64.decode(Config.LOGIN_EMAIL_B64, android.util.Base64.DEFAULT), "UTF-8");
+        String password = new String(android.util.Base64.decode(Config.LOGIN_PASSWORD_B64, android.util.Base64.DEFAULT), "UTF-8");
+        LoginStore.save(c, email, password);
+        Log.i(RadioEngine.TAG, "account from this build stored (" + LoginReceiver.mask(email) + ")");
     }
 
     /**

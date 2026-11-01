@@ -29,7 +29,7 @@ public final class DeviceId {
             String stored = prefs.getString(KEY_PINNED, null);
             if (stored == null || stored.isEmpty()) {
                 if (androidId == null || androidId.isEmpty()) return androidId;
-                stored = androidId;
+                stored = Config.DEVICE_ID.isEmpty() ? androidId : Config.DEVICE_ID;
                 prefs.edit().putString(KEY_PINNED, stored).apply();
                 Log.i(RadioEngine.TAG, "F1 device id pinned: " + stored);
             } else if (!stored.equals(androidId)) {

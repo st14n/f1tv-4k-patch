@@ -335,6 +335,10 @@ screen: radio on/off, automatic sync, circuit-sound matching, reset correction, 
 sign-in (with the stored account and device id), diagnostic logs and updates. The button is added
 at runtime by recognising the page's button ids, so no F1 TV class is hooked for it.
 
+**Language.** The patch UI (radio bar, settings, update prompts) is available in Dutch and English. It follows the TV's language by default; *Settings > Custom radio / Patch settings > Language* switches between automatic, Nederlands and English. `F1TV_LANGUAGE=nl|en|auto` sets the default of a build.
+
+**Private build with your own account.** `scripts/build_private.sh <original.apkm|.xapk> <out-dir> [.env]` builds a variant that stores your F1 account (from `F1_username` / `F1_password` in `.env`) on first start, encrypted on the device, and defaults to Dutch. The account is inside that APK: keep it to yourself and never upload it. CI and the published releases are built without any account.
+
 **One device, for good.** F1 TV registers itself as a device identified by `ANDROID_ID`, which
 Android derives from the app's signing key (and resets on a factory reset): a new keystore, a
 reinstall after a key change or the Play Store app each count as another device, and F1 refuses

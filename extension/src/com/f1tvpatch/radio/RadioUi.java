@@ -756,7 +756,7 @@ final class RadioUi {
     }
 
     private static String t(String nl, String en) {
-        return "nl".equals(Locale.getDefault().getLanguage()) ? nl : en;
+        return Updater.t(nl, en);
     }
 
     private static int dp(Context c, float value) {
