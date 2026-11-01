@@ -121,7 +121,11 @@ public final class RadioPatch {
     private AcousticCorrelator.Estimate pendingEstimate;
     private long pendingEstimateAtMs;
     private long lastAcousticCheckAtMs;
+    /** User asked "sync again": until then one confident acoustic estimate is applied at once. */
+    private long resyncUntilMs;
+    private static final long RESYNC_WINDOW_MS = 90_000L;
     private String lagSource = "none";
+    private boolean resyncNoticePending;
     private long nextStatusLogAtMs;
 
     private final Runnable tick = this::tick;
@@ -262,6 +266,13 @@ public final class RadioPatch {
         long sample = sampleVideoLag(player);
         videoLagMs = sample < 0 ? -1L : smoothLag(sample);
         logStatus(videoPlaying);
+        if (resyncNoticePending && SystemClock.elapsedRealtime() >= resyncUntilMs) {
+            resyncNoticePending = false;
+            if (resyncUntilMs != 0L) {
+                ui.notify(RadioUi.Notice.RESYNC_FAILED, null);
+                resyncUntilMs = 0L;
+            }
+        }
         if (autoSync) {
             targetDelayMs = videoLagMs < 0 ? -1L : clampDelay(videoLagMs + adjustMs);
         } else {
@@ -409,6 +420,40 @@ public final class RadioPatch {
         Log.i(TAG, "acoustic sync " + (value ? "on" : "off"));
     }
 
+    /**
+     * "Sync again" from the bar: forget what the sync has learned this session (lag window, pending
+     * and paused acoustic state) and measure afresh; the next confident acoustic estimate is applied
+     * at once, even with the circuit-sound option off. Gives up with a notice after 90 s.
+     */
+    void resync() {
+        long now = SystemClock.elapsedRealtime();
+        acousticSuspended = false;
+        lagSamples.clear();
+        lagAboveCount = 0;
+        pendingEstimate = null;
+        lastAcousticCheckAtMs = 0L;
+        nextAcousticAtMs = 0L;
+        resyncUntilMs = now + RESYNC_WINDOW_MS;
+        resyncNoticePending = true;
+        markAlignmentChanged();
+        Log.i(TAG, "resync requested");
+        ui.notify(RadioUi.Notice.RESYNC_STARTED, null);
+    }
+
+    boolean isResyncing() { return SystemClock.elapsedRealtime() < resyncUntilMs; }
+
+    /** "Reconnect radio": drop the radio stream and its buffer and start it over (F1 audio meanwhile). */
+    void reconnect() {
+        if (engine != null) {
+            engine.release();
+            engine = null;
+        }
+        announcedSync = false;
+        radioCarrying = false;
+        setF1Muted(false);
+        Log.i(TAG, "radio reconnect requested");
+    }
+
     void resumeAcoustic() {
         acousticSuspended = false;
         markAlignmentChanged();
@@ -495,7 +540,8 @@ public final class RadioPatch {
 
     private void maybeRunAcousticEstimate() {
         long now = SystemClock.elapsedRealtime();
-        if (!autoSync || !acoustic || acousticSuspended || acousticInFlight || now < nextAcousticAtMs) return;
+        boolean resyncing = now < resyncUntilMs;
+        if (!autoSync || !(acoustic || resyncing) || acousticSuspended || acousticInFlight || now < nextAcousticAtMs) return;
         nextAcousticAtMs = now + ACOUSTIC_INTERVAL_MS;
         final double notBeforeMs = lastAlignmentChangeAtMs;
         acousticInFlight = true;
@@ -521,10 +567,27 @@ public final class RadioPatch {
                 && Math.abs(estimate.lagMs) <= AcousticCorrelator.MAX_LAG_MS - ACOUSTIC_EDGE_MARGIN_MS;
         Log.i(TAG, String.format(Locale.ROOT, "acoustic estimate lagMs=%d score=%.3f peakRatio=%.2f confident=%b",
                 estimate.lagMs, estimate.score, estimate.peakRatio, confident));
+        boolean resyncing = SystemClock.elapsedRealtime() < resyncUntilMs;
         if (!confident) return;
         if (Math.abs(estimate.lagMs) < ACOUSTIC_DEADBAND_MS) {
             pendingEstimate = null;
             lastAcousticCheckAtMs = SystemClock.elapsedRealtime();
+            if (resyncing) {
+                resyncUntilMs = 0L;
+                resyncNoticePending = false;
+                ui.notify(RadioUi.Notice.RESYNC_OK, estimate.lagMs);
+            }
+            return;
+        }
+        if (resyncing) {
+            // Explicit request: a single estimate that passes the strict thresholds is enough
+            resyncUntilMs = 0L;
+            resyncNoticePending = false;
+            pendingEstimate = null;
+            setAdjust(adjustMs - estimate.lagMs);
+            lastAcousticCheckAtMs = SystemClock.elapsedRealtime();
+            Log.i(TAG, "resync correction lagMs=" + estimate.lagMs + " adjustMs=" + adjustMs);
+            ui.notify(RadioUi.Notice.ACOUSTIC_ADJUSTED, -estimate.lagMs);
             return;
         }
         AcousticCorrelator.Estimate previous = pendingEstimate;

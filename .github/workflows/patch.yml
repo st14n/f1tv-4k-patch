@@ -497,6 +497,17 @@ jobs:
           if [[ "${{ github.ref_name }}" != "main" ]]; then F1TV_RELEASE_TAG="${F1TV_RELEASE_TAG}-${{ github.ref_name }}"; fi
           export F1TV_RELEASE_TAG
           bash scripts/patch.sh "${{ steps.apkm.outputs.path }}" output/
+
+          # Second variant for the same release: everything except the custom radio and its URL
+          # (sign-in, device id, updater, settings). The in-app updater keeps each install on its own
+          # variant by asset name. Set the repo variable F1TV_BUILD_NORADIO=0 to skip it.
+          if [[ -n "${F1TV_CUSTOM_AUDIO_URL}" && "${F1TV_BUILD_NORADIO}" != "0" ]]; then
+            F1TV_CUSTOM_AUDIO_URL="" F1TV_EXTENSION=1 bash scripts/patch.sh "${{ steps.apkm.outputs.path }}" output-noradio/
+            if [[ -f output-noradio/f1tv-patched-universal.apk ]]; then
+              cp output-noradio/f1tv-patched-universal.apk output/f1tv-patched-noradio-universal.apk
+            fi
+            cp output-noradio/f1tv-uhd-patched.apkm output/f1tv-uhd-patched-noradio.apkm
+          fi
         env:
           # Unlock the 2160p tier. Both default on in patch.sh; set explicitly
           # here for clarity. The HDR render path (native HLG, PQ reroute, or
@@ -519,6 +530,7 @@ jobs:
           # null != '0' compares as numbers, 0 != 0 -> false; hence the '1' default.)
           F1TV_UPDATE_REPO: ${{ (vars.F1TV_SELF_UPDATE || '1') != '0' && github.repository || '' }}
           F1TV_BUILD_RUN: ${{ github.run_id }}
+          F1TV_BUILD_NORADIO: ${{ vars.F1TV_BUILD_NORADIO || '1' }}
           KEYSTORE_PATH: ${{ env.KEYSTORE_PATH || '' }}
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS || 'android' }}
           KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS || 'f1tvpatch' }}
@@ -579,6 +591,10 @@ jobs:
 
           ## Install
 
+          Two variants: \`f1tv-patched-universal.apk\` has the custom radio built in,
+          \`f1tv-patched-noradio-universal.apk\` is the same without the radio (and without its stream
+          URL). The in-app updater keeps each install on its own variant.
+
           **Easiest:** download \`f1tv-patched-universal.apk\` (all CPU types in one file) and install it
           with \`adb install -r f1tv-patched-universal.apk\`, a file manager, or an updater app such as Obtainium.
 
@@ -594,7 +610,7 @@ jobs:
           NOTES
           )" \
             output/f1tv-uhd-patched.apkm \
-            $(ls output/f1tv-patched-universal.apk 2>/dev/null)
+            $(ls output/f1tv-patched-universal.apk output/f1tv-patched-noradio-universal.apk output/f1tv-uhd-patched-noradio.apkm 2>/dev/null)
 
           echo "release_url=https://github.com/${{ github.repository }}/releases/tag/${TAG}" >> "$GITHUB_OUTPUT"
         env:

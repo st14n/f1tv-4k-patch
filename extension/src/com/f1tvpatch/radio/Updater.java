@@ -51,7 +51,8 @@ public final class Updater {
     static final String KEY_AUTO_UPDATE = "auto_update";
     private static final String KEY_LAST_CHECK = "update_last_check";
     private static final String KEY_SKIP_RELEASE = "update_skip_release";
-    private static final long CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L;
+    private static final String KEY_PENDING = "update_pending";
+    private static final long CHECK_INTERVAL_MS = 30 * 60 * 1000L;
     private static final String ACTION_INSTALL_STATUS = "com.f1tvpatch.radio.INSTALL_STATUS";
     private static final Pattern RUN_MARKER = Pattern.compile("run:(\\d+)");
 
@@ -62,8 +63,12 @@ public final class Updater {
         return thread;
     });
     private static boolean lifecycleRegistered;
-    private static boolean checkedThisProcess;
     private static WeakReference<Activity> resumedActivity = new WeakReference<>(null);
+    private static int startedActivities;
+    /** The app just came to the foreground: show the pending update once on the next suitable screen. */
+    private static boolean offerDue;
+    private static boolean offerShowing;
+    private static boolean checkRunning;
 
     static final class Release {
         final String tag;
@@ -94,44 +99,100 @@ public final class Updater {
 
     // ── Smali hook ───────────────────────────────────────────────────────────
 
-    /** Called from F1TV's {@code SplashActivity.onCreate}: checks once a screen is in front. */
+    /**
+     * Called from F1TV's launch activity. Every time the app comes to the foreground (not only on a
+     * cold start) a pending update is offered again on the first suitable screen, until it is
+     * installed or the user chooses "Don't ask again"; a fresh check runs at most every 30 minutes.
+     */
     public static void onLaunch(Activity launcher) {
         try {
             if (!isConfigured() || lifecycleRegistered) return;
             lifecycleRegistered = true;
             Application app = launcher.getApplication();
             app.registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
+                @Override public void onActivityStarted(Activity a) {
+                    if (startedActivities++ == 0) offerDue = true;
+                }
+                @Override public void onActivityStopped(Activity a) {
+                    if (startedActivities > 0) startedActivities--;
+                }
                 @Override public void onActivityResumed(Activity a) {
                     resumedActivity = new WeakReference<>(a);
-                    maybeAutoCheck(a);
+                    onScreen(a);
                 }
                 @Override public void onActivityPaused(Activity a) {
                     if (resumedActivity.get() == a) resumedActivity = new WeakReference<>(null);
                 }
                 @Override public void onActivityCreated(Activity a, Bundle b) { }
-                @Override public void onActivityStarted(Activity a) { }
-                @Override public void onActivityStopped(Activity a) { }
                 @Override public void onActivitySaveInstanceState(Activity a, Bundle b) { }
                 @Override public void onActivityDestroyed(Activity a) { }
             });
+            // The launcher is already running: it counts as the first started screen
+            if (startedActivities == 0) {
+                startedActivities = 1;
+                offerDue = true;
+            }
         } catch (Throwable t) {
             Log.e(TAG, "updater init failed", t);
         }
     }
 
-    private static void maybeAutoCheck(Activity activity) {
-        if (checkedThisProcess) return;
-        SharedPreferences prefs = prefs(activity);
-        if (!prefs.getBoolean(KEY_AUTO_UPDATE, true)) return;
-        if (System.currentTimeMillis() - prefs.getLong(KEY_LAST_CHECK, 0L) < CHECK_INTERVAL_MS) return;
-        checkedThisProcess = true;
-        check(activity, false);
+    private static boolean isPlayerScreen(Activity a) {
+        String name = a.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+        return name.contains("player") || a instanceof PatchSettingsActivity;
+    }
+
+    private static void onScreen(Activity activity) {
+        try {
+            SharedPreferences prefs = prefs(activity);
+            if (!prefs.getBoolean(KEY_AUTO_UPDATE, true)) return;
+            if (isPlayerScreen(activity)) return; // never over a stream; the next menu screen gets it
+            if (System.currentTimeMillis() - prefs.getLong(KEY_LAST_CHECK, 0L) >= CHECK_INTERVAL_MS) {
+                check(activity, false);
+            }
+            if (offerDue && !offerShowing) {
+                Release pending = pendingRelease(activity);
+                if (pending != null && isNewer(pending)) {
+                    offerDue = false;
+                    offer(activity, pending);
+                } else if (pending != null) {
+                    prefs.edit().remove(KEY_PENDING).apply();
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "update screen hook failed", t);
+        }
+    }
+
+    // ── Pending release (remembered between starts, so the offer does not need the network) ──
+
+    private static void rememberPending(Context c, Release r) {
+        try {
+            JSONObject json = new JSONObject();
+            json.put("tag", r.tag).put("name", r.name).put("run", r.run).put("url", r.apkUrl).put("size", r.apkSize);
+            prefs(c).edit().putString(KEY_PENDING, json.toString()).apply();
+        } catch (Throwable ignored) {
+            // best effort
+        }
+    }
+
+    private static Release pendingRelease(Context c) {
+        try {
+            String raw = prefs(c).getString(KEY_PENDING, null);
+            if (raw == null) return null;
+            JSONObject j = new JSONObject(raw);
+            return new Release(j.optString("tag"), j.optString("name"), j.optString("run"), j.optString("url"), j.optLong("size"));
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     // ── Check ────────────────────────────────────────────────────────────────
 
-    /** Looks for a new release; {@code userInitiated} also reports "up to date" and ignores skips. */
+    /** Looks for a new release; {@code userInitiated} also reports "up to date" and works with auto-update off. */
     static void check(Activity activity, boolean userInitiated) {
+        if (checkRunning) return;
+        checkRunning = true;
         final Context app = activity.getApplicationContext();
         WORKER.execute(() -> {
             Release release = null;
@@ -142,24 +203,35 @@ public final class Updater {
                 error = t.getClass().getSimpleName() + ": " + t.getMessage();
                 Log.w(TAG, "update check failed", t);
             }
-            prefs(app).edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply();
+            if (release != null) prefs(app).edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply();
             final Release found = release;
             final String failure = error;
             MAIN.post(() -> {
+                checkRunning = false;
                 Activity target = resumedActivity.get() != null ? resumedActivity.get() : activity;
-                if (target == null || target.isFinishing()) return;
                 if (found == null) {
-                    if (userInitiated) toast(target, t("Controleren mislukt: ", "Check failed: ") + failure);
+                    if (userInitiated && target != null && !target.isFinishing()) {
+                        toast(target, t("Controleren mislukt: ", "Check failed: ") + failure);
+                    }
                     return;
                 }
                 boolean newer = isNewer(found);
                 Log.i(TAG, "update check: latest=" + found.id() + " current=" + Config.RELEASE_TAG + "#" + Config.BUILD_RUN + " newer=" + newer);
                 if (!newer) {
-                    if (userInitiated) toast(target, t("Je hebt de nieuwste versie.", "You're on the latest version."));
+                    prefs(app).edit().remove(KEY_PENDING).apply();
+                    if (userInitiated && target != null && !target.isFinishing()) {
+                        toast(target, t("Je hebt de nieuwste versie.", "You're on the latest version."));
+                    }
                     return;
                 }
-                if (!userInitiated && found.id().equals(prefs(target).getString(KEY_SKIP_RELEASE, ""))) return;
-                offer(target, found);
+                rememberPending(app, found);
+                if (target == null || target.isFinishing() || offerShowing) return;
+                if (userInitiated) {
+                    offer(target, found);
+                } else if (offerDue && !isPlayerScreen(target) && prefs(app).getBoolean(KEY_AUTO_UPDATE, true)) {
+                    offerDue = false;
+                    offer(target, found);
+                }
             });
         });
     }
@@ -184,14 +256,18 @@ public final class Updater {
             JSONArray assets = json.optJSONArray("assets");
             String apkUrl = null;
             long size = 0L;
+            // Two variants share a release: with the radio (...-universal.apk) and without
+            // (...-noradio-universal.apk); a build only updates to its own kind.
+            boolean wantNoRadio = Config.STREAM_URL.isEmpty();
             for (int i = 0; assets != null && i < assets.length(); i++) {
                 JSONObject asset = assets.getJSONObject(i);
-                if (asset.optString("name", "").endsWith("-universal.apk")) {
+                String name = asset.optString("name", "");
+                if (name.endsWith("-universal.apk") && name.contains("noradio") == wantNoRadio) {
                     apkUrl = asset.optString("browser_download_url", null);
                     size = asset.optLong("size", 0L);
                 }
             }
-            if (apkUrl == null) throw new IllegalStateException("release has no universal APK");
+            if (apkUrl == null) throw new IllegalStateException("release has no " + (wantNoRadio ? "no-radio" : "radio") + " APK");
             return new Release(json.optString("tag_name", ""), json.optString("name", ""),
                     run.find() ? run.group(1) : "", apkUrl, size);
         } finally {
@@ -201,36 +277,50 @@ public final class Updater {
 
     // ── Offer + install ──────────────────────────────────────────────────────
 
+    private static boolean canInstall(Activity activity) {
+        return Build.VERSION.SDK_INT < 26 || activity.getPackageManager().canRequestPackageInstalls();
+    }
+
     private static void offer(Activity activity, Release release) {
-        new AlertDialog.Builder(activity)
+        if (offerShowing) return;
+        offerShowing = true;
+        boolean permitted = canInstall(activity);
+        String message = String.format(Locale.getDefault(),
+                t("%s is beschikbaar.\nNu geïnstalleerd: %s.\n\nJe blijft ingelogd en je instellingen blijven bewaard.",
+                        "%s is available.\nInstalled now: %s.\n\nYou stay signed in and keep your settings."),
+                release.name.isEmpty() ? release.tag : release.name, currentVersionLabel());
+        if (!permitted) {
+            message += t("\n\nEerst moet je deze app toestemming geven om apps te installeren (eenmalig). "
+                            + "Zolang dat niet is gedaan, zie je deze melding bij elke start.",
+                    "\n\nFirst allow this app to install apps (once). Until you do, you will see this at every start.");
+        }
+        AlertDialog dialog = new AlertDialog.Builder(activity)
                 .setTitle(t("Update voor F1 TV (patch)", "F1 TV (patched) update"))
-                .setMessage(String.format(Locale.getDefault(),
-                        t("%s is beschikbaar.\nNu geïnstalleerd: %s.\n\nJe blijft ingelogd en je radio-instellingen blijven bewaard.",
-                                "%s is available.\nInstalled now: %s.\n\nYou stay signed in and keep your radio settings."),
-                        release.name.isEmpty() ? release.tag : release.name, currentVersionLabel()))
-                .setPositiveButton(t("Installeren", "Install"), (d, w) -> install(activity, release))
-                .setNeutralButton(t("Deze overslaan", "Skip this one"),
-                        (d, w) -> prefs(activity).edit().putString(KEY_SKIP_RELEASE, release.id()).apply())
+                .setMessage(message)
+                .setPositiveButton(permitted ? t("Installeren", "Install") : t("Toestemming geven", "Allow"),
+                        (d, w) -> install(activity, release))
                 .setNegativeButton(t("Later", "Later"), null)
-                .show();
+                .setNeutralButton(t("Niet meer vragen", "Don't ask again"), (d, w) -> {
+                    prefs(activity).edit().putBoolean(KEY_AUTO_UPDATE, false).apply();
+                    toast(activity, t("Update-meldingen staan uit. Aanzetten kan onder Instellingen > Custom radio > Updates.",
+                            "Update notices are off. Turn them back on in Settings > Custom radio > Updates."));
+                })
+                .create();
+        dialog.setOnDismissListener(d -> offerShowing = false);
+        dialog.show();
+        android.widget.Button positive = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+        if (positive != null) positive.requestFocus();
     }
 
     private static void install(Activity activity, Release release) {
-        if (Build.VERSION.SDK_INT >= 26 && !activity.getPackageManager().canRequestPackageInstalls()) {
-            new AlertDialog.Builder(activity)
-                    .setTitle(t("Toestemming nodig", "Permission needed"))
-                    .setMessage(t("Sta F1 TV eenmalig toe om apps te installeren. Kies daarna opnieuw Installeren.",
-                            "Allow F1 TV to install apps once, then choose Install again."))
-                    .setPositiveButton(t("Naar instellingen", "Open settings"), (d, w) -> {
-                        try {
-                            activity.startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                                    Uri.parse("package:" + activity.getPackageName())));
-                        } catch (Throwable t) {
-                            toast(activity, t("Kon de instellingen niet openen.", "Couldn't open settings."));
-                        }
-                    })
-                    .setNegativeButton(t("Annuleren", "Cancel"), null)
-                    .show();
+        if (!canInstall(activity)) {
+            try {
+                activity.startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + activity.getPackageName())));
+                toast(activity, t("Zet de schakelaar aan en kom terug naar de app.", "Switch it on and come back to the app."));
+            } catch (Throwable t) {
+                toast(activity, t("Kon de instellingen niet openen.", "Couldn't open settings."));
+            }
             return;
         }
         final Context app = activity.getApplicationContext();
@@ -270,6 +360,12 @@ public final class Updater {
             PackageInstaller installer = app.getPackageManager().getPackageInstaller();
             PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
             params.setAppPackageName(app.getPackageName());
+            if (Build.VERSION.SDK_INT >= 31) {
+                // Skips the "install this update?" screen where Android allows it: this app is the
+                // installer of record (true after the first in-app update) and the signature matches.
+                // Where it does not, the system asks as before.
+                params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED);
+            }
             int sessionId = installer.createSession(params);
             try (PackageInstaller.Session session = installer.openSession(sessionId)) {
                 try (InputStream in = new FileInputStream(apk); OutputStream out = session.openWrite("base.apk", 0, apk.length())) {

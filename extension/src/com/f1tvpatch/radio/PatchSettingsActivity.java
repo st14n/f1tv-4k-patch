@@ -121,7 +121,8 @@ public final class PatchSettingsActivity extends Activity {
         scroll.addView(list, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(scroll);
 
-        TextView heading = text("Custom radio", 30, TEXT, true);
+        final boolean hasRadio = !Config.STREAM_URL.isEmpty();
+        TextView heading = text(hasRadio ? "Custom radio" : t("Patch-instellingen", "Patch settings"), 30, TEXT, true);
         heading.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
         list.addView(heading);
         View accent = new View(this);
@@ -129,25 +130,29 @@ public final class PatchSettingsActivity extends Activity {
         LinearLayout.LayoutParams accentParams = new LinearLayout.LayoutParams(dp(48), dp(4));
         accentParams.setMargins(0, dp(6), 0, dp(8));
         list.addView(accent, accentParams);
-        list.addView(text(t("Wijzigingen gelden vanaf de volgende keer dat je iets afspeelt. Tijdens live kijken: "
-                        + "MENU, een gekleurde toets of OK ingedrukt houden opent het radiopaneel.",
-                "Changes apply from the next playback. While watching live: MENU, a colour key or holding OK opens the radio panel."),
-                14, MUTED, false));
+        if (hasRadio) {
+            list.addView(text(t("Wijzigingen gelden vanaf de volgende keer dat je iets afspeelt. Tijdens live kijken: "
+                            + "lang op OK, MENU of een gekleurde toets opent de radiobalk.",
+                    "Changes apply from the next playback. While watching live: long-press OK, MENU or a colour key opens the radio bar."),
+                    14, MUTED, false));
+        }
 
-        section(t("Radio", "Radio"));
-        toggle(t("Custom radio gebruiken", "Use custom radio"), "enabled", Config.DEFAULT_ENABLED,
-                t("Vervangt het F1-commentaar bij live sessies.", "Replaces the F1 commentary in live sessions."));
-        toggle(t("Automatisch synchroniseren", "Automatic sync"), "auto_sync", true,
-                t("Volgt hoe ver het beeld achter live loopt.", "Follows how far the picture is behind live."));
-        toggle(t("Afstemmen op circuitgeluid", "Match to circuit sound"), "acoustic_sync", true,
-                t("Stelt de sync bij met het circuitgeluid onder de radio.", "Fine-tunes the sync using the circuit sound under the radio."));
-        Row correction = row(t("Correctie terugzetten", "Reset correction"));
-        correction.summarySource = () -> {
-            long adjust = Updater.prefs(this).getLong("adjust_ms", Config.DEFAULT_ADJUST_MS);
-            return String.format(Locale.getDefault(), t("Nu %+.2f s, terug naar %+.2f s", "Now %+.2f s, back to %+.2f s"),
-                    adjust / 1000.0, Config.DEFAULT_ADJUST_MS / 1000.0);
-        };
-        correction.onClick = () -> Updater.prefs(this).edit().putLong("adjust_ms", Config.DEFAULT_ADJUST_MS).apply();
+        if (hasRadio) {
+            section(t("Radio", "Radio"));
+            toggle(t("Custom radio gebruiken", "Use custom radio"), "enabled", Config.DEFAULT_ENABLED,
+                    t("Vervangt het F1-commentaar bij live sessies.", "Replaces the F1 commentary in live sessions."));
+            toggle(t("Automatisch synchroniseren", "Automatic sync"), "auto_sync", true,
+                    t("Volgt hoe ver het beeld achter live loopt.", "Follows how far the picture is behind live."));
+            toggle(t("Afstemmen op circuitgeluid", "Match to circuit sound"), "acoustic_sync", true,
+                    t("Stelt de sync bij met het circuitgeluid onder de radio.", "Fine-tunes the sync using the circuit sound under the radio."));
+            Row correction = row(t("Correctie terugzetten", "Reset correction"));
+            correction.summarySource = () -> {
+                long adjust = Updater.prefs(this).getLong("adjust_ms", Config.DEFAULT_ADJUST_MS);
+                return String.format(Locale.getDefault(), t("Nu %+.2f s, terug naar %+.2f s", "Now %+.2f s, back to %+.2f s"),
+                        adjust / 1000.0, Config.DEFAULT_ADJUST_MS / 1000.0);
+            };
+            correction.onClick = () -> Updater.prefs(this).edit().putLong("adjust_ms", Config.DEFAULT_ADJUST_MS).apply();
+        }
 
         section(t("Inloggen", "Sign-in"));
         Row autoLogin = toggle(t("Automatisch opnieuw inloggen", "Sign in again automatically"), AutoLogin.KEY_ENABLED, true, null);

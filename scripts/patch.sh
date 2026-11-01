@@ -793,7 +793,11 @@ fi # UHD_PATCHES
 # that is calibrated once with the remote (MENU/colour key or long-press OK).
 
 RADIO_DEX=""
-if [[ -n "${F1TV_CUSTOM_AUDIO_URL:-}" ]]; then
+# The extension (auto-login, device id pin, updater, settings screen) is also built without a
+# radio stream: F1TV_EXTENSION=1 with an empty F1TV_CUSTOM_AUDIO_URL gives the "no radio" variant.
+EXTENSION_ENABLED=0
+[[ -n "${F1TV_CUSTOM_AUDIO_URL:-}" || "${F1TV_EXTENSION:-0}" == "1" ]] && EXTENSION_ENABLED=1
+if [[ "${EXTENSION_ENABLED}" == "1" ]]; then
     info "Adding custom radio audio..."
     PATCH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     RADIO_DEX="${WORKDIR}/radio.dex"
@@ -1186,7 +1190,7 @@ if 'com.f1tvpatch.radio.PatchSettingsActivity' not in text and '</application>' 
 PYEOF
     ok "Custom radio hooks applied (dex is injected after rebuild)"
 else
-    info "F1TV_CUSTOM_AUDIO_URL not set, skipping custom radio audio"
+    info "F1TV_CUSTOM_AUDIO_URL not set (and F1TV_EXTENSION!=1), skipping the patch extension"
 fi
 
 # ─── Decoder max-resolution hint (default ON) ────────────────────────────────
@@ -1402,6 +1406,8 @@ if [[ "${UHD_PATCHES}" != "0" ]]; then
     VER_SUFFIX="-UHD"
 elif [[ -n "${F1TV_CUSTOM_AUDIO_URL:-}" ]]; then
     VER_SUFFIX="-RADIO"
+elif [[ "${EXTENSION_ENABLED}" == "1" ]]; then
+    VER_SUFFIX="-PATCH"
 else
     VER_SUFFIX="-PATCHED"
 fi
@@ -1485,7 +1491,7 @@ if [[ "${F1TV_DISPLAY_HDR_SPOOF:-1}" != "0" ]]; then
     fi
 fi
 fi # UHD_PATCHES
-if [[ -n "${F1TV_CUSTOM_AUDIO_URL:-}" ]]; then
+if [[ "${EXTENSION_ENABLED}" == "1" ]]; then
     # Required radio hooks; the acoustic-sync tap and the settings/updater hooks are optional extras
     # Hook targets may be found by structure in a renamed F1TV, so look for the markers anywhere
     for hook in 'onPlayerCreated:player hook' 'onKeyEvent:key hook'; do

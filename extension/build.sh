@@ -30,8 +30,8 @@ LAMBDA_STUBS="${BT_DIR}core-lambda-stubs.jar"
 [[ -f "${LAMBDA_STUBS}" ]] || { echo "core-lambda-stubs.jar not found in ${BT_DIR}" >&2; exit 1; }
 
 URL="${F1TV_CUSTOM_AUDIO_URL:-}"
-[[ -n "${URL}" ]] || { echo "F1TV_CUSTOM_AUDIO_URL is empty" >&2; exit 1; }
-[[ "${URL}" =~ ^https?:// ]] || { echo "F1TV_CUSTOM_AUDIO_URL must be http(s)" >&2; exit 1; }
+# Empty URL = the "no radio" variant: everything but the radio (login, device id, updater, settings)
+[[ -z "${URL}" || "${URL}" =~ ^https?:// ]] || { echo "F1TV_CUSTOM_AUDIO_URL must be http(s)" >&2; exit 1; }
 ADJUST_MS="${F1TV_CUSTOM_AUDIO_ADJUST_MS:-0}"
 FALLBACK_MS="${F1TV_CUSTOM_AUDIO_FALLBACK_MS:-20000}"
 [[ "${ADJUST_MS}" =~ ^-?[0-9]+$ && "${FALLBACK_MS}" =~ ^[0-9]+$ ]] || { echo "ms values must be integers" >&2; exit 1; }

@@ -38,7 +38,7 @@ import java.util.Locale;
  * Long-press OK opens the bar from anywhere. Built in code: the patch ships no resources.
  */
 final class RadioUi {
-    enum Notice { IN_SYNC, ACOUSTIC_ADJUSTED, BUFFER_EXCEEDED }
+    enum Notice { IN_SYNC, ACOUSTIC_ADJUSTED, BUFFER_EXCEEDED, RESYNC_STARTED, RESYNC_OK, RESYNC_FAILED }
 
     private static final int BG = 0xF20D0E12;
     private static final int CARD = 0xFF1C1F26;
@@ -54,6 +54,8 @@ final class RadioUi {
     private static final long BAR_LINGER_MS = 1_500L;
     private static final long BAR_FORCED_MS = 8_000L;
     private static final long NOTICE_MS = 5_000L;
+    /** The panel closes by itself after this long without a key press, so it can never get stuck open. */
+    private static final long PANEL_IDLE_MS = 25_000L;
 
     private final WeakReference<Activity> activityRef;
     private final RadioPatch radio;
@@ -66,7 +68,12 @@ final class RadioUi {
     private TextView barValue;
     private TextView barValueLabel;
     private TextView barLater;
+    private TextView barRadio;
+    private TextView barResync;
     private long barVisibleUntilMs;
+    /** What had focus before the bar took it (F1's controls), so closing the bar gives it back. */
+    private WeakReference<View> focusBeforeBar = new WeakReference<>(null);
+    private long panelLastInputMs;
 
     // Notices (C)
     private LinearLayout notices;
@@ -86,6 +93,8 @@ final class RadioUi {
     private SwitchRow acousticRow;
     private TextView resumeAcoustic;
     private TextView radioRow;
+    private TextView panelReconnect;
+    private TextView panelClose;
 
     private WeakReference<View> controlsRef = new WeakReference<>(null);
     private Method controlsVisibleMethod;
@@ -105,8 +114,15 @@ final class RadioUi {
         boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
 
         if (isPanelOpen()) {
-            if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_ESCAPE) {
+            panelLastInputMs = SystemClock.elapsedRealtime();
+            if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_ESCAPE || code == KeyEvent.KEYCODE_MENU) {
                 if (down && event.getRepeatCount() == 0) closePanel();
+                return true; // both the down and the up event, so F1 never sees a stray Back
+            }
+            // Focus must stay inside the panel; if F1's views took it, pull it back
+            View panelFocus = activity.getCurrentFocus();
+            if (panelFocus == null || !isDescendant(panelFocus, panel)) {
+                if (down) panelEarlier.requestFocus();
                 return true;
             }
             return false; // the panel's focused views handle the rest
@@ -126,9 +142,9 @@ final class RadioUi {
         boolean focusInBar = bar != null && isDescendant(focus, bar);
         if (focusInBar) {
             barVisibleUntilMs = SystemClock.elapsedRealtime() + BAR_FORCED_MS;
-            if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_ESCAPE) {
+            if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_ESCAPE || code == KeyEvent.KEYCODE_DPAD_DOWN) {
                 if (down && event.getRepeatCount() == 0) {
-                    focus.clearFocus();
+                    leaveBar();
                     barVisibleUntilMs = SystemClock.elapsedRealtime() + BAR_LINGER_MS;
                 }
                 return true;
@@ -140,6 +156,7 @@ final class RadioUi {
         if (down && code == KeyEvent.KEYCODE_DPAD_UP && bar != null && bar.getVisibility() == View.VISIBLE && focus != null) {
             View next = FocusFinder.getInstance().findNextFocus((ViewGroup) activity.getWindow().getDecorView(), focus, View.FOCUS_UP);
             if (next == null || isDescendant(next, bar)) {
+                rememberFocus(focus);
                 barLater.requestFocus();
                 return true;
             }
@@ -165,11 +182,14 @@ final class RadioUi {
         // it stays while used and disappears once F1's controls are gone and the remote is idle.
         boolean focusInBar = isDescendant(focus, bar);
         boolean showBar = !isPanelOpen() && (radioMatters || focusInBar) && now < barVisibleUntilMs;
-        if (!showBar && focusInBar) focus.clearFocus();
+        if (!showBar && focusInBar) leaveBar();
         bar.setVisibility(showBar ? View.VISIBLE : View.GONE);
         if (showBar) refreshBar(state);
 
-        if (isPanelOpen()) refreshPanel(state);
+        if (isPanelOpen()) {
+            refreshPanel(state);
+            if (now - panelLastInputMs > PANEL_IDLE_MS) closePanel();
+        }
 
         refreshNotices(state, now, showBar);
         lastState = state;
@@ -189,6 +209,18 @@ final class RadioUi {
                 addNotice(Icon.WAVE, t("Afgestemd op het circuitgeluid", "Matched to the circuit sound"),
                         String.format(Locale.getDefault(), t("Radio %.2f s %s gezet.", "Radio set %.2f s %s."),
                                 Math.abs(ms) / 1000.0, ms < 0 ? t("eerder", "earlier") : t("later", "later")));
+                break;
+            case RESYNC_STARTED:
+                addNotice(Icon.WAVE, t("Opnieuw syncen…", "Syncing again…"),
+                        t("Even het circuitgeluid meten, dat duurt een halve minuut.", "Measuring the circuit sound, about half a minute."));
+                break;
+            case RESYNC_OK:
+                addNotice(Icon.CHECK, t("Gecontroleerd: radio loopt gelijk", "Checked: the radio is in sync"),
+                        String.format(Locale.getDefault(), t("Verschil %.2f s.", "Difference %.2f s."), Math.abs(valueMs == null ? 0 : valueMs) / 1000.0));
+                break;
+            case RESYNC_FAILED:
+                addNotice(Icon.WARN, t("Geen betrouwbare meting", "No reliable measurement"),
+                        t("Stel zelf bij met Meer / Minder, of probeer later opnieuw.", "Adjust by hand with More / Less, or try again later."));
                 break;
             case BUFFER_EXCEEDED:
                 addNotice(Icon.WARN, t("Te ver achter live voor de radio", "Too far behind live for the radio"),
@@ -212,10 +244,27 @@ final class RadioUi {
 
     // ── Bar ──────────────────────────────────────────────────────────────────
 
+    private void rememberFocus(View focus) {
+        if (focus != null && root != null && !isDescendant(focus, root)) focusBeforeBar = new WeakReference<>(focus);
+    }
+
+    /** Take focus out of the bar and give it back to what had it before (F1's controls). */
+    private void leaveBar() {
+        Activity activity = activityRef.get();
+        View focus = activity == null ? null : activity.getCurrentFocus();
+        if (focus != null && isDescendant(focus, root)) focus.clearFocus();
+        View previous = focusBeforeBar.get();
+        focusBeforeBar = new WeakReference<>(null);
+        if (previous != null && previous.isAttachedToWindow() && previous.getVisibility() == View.VISIBLE) {
+            previous.requestFocus();
+        }
+    }
+
     private void showBar(boolean focus) {
         Activity activity = activityRef.get();
         if (activity == null) return;
         ensureViews(activity);
+        if (focus) rememberFocus(activity.getCurrentFocus());
         barVisibleUntilMs = SystemClock.elapsedRealtime() + BAR_FORCED_MS;
         bar.setVisibility(View.VISIBLE);
         refreshBar(radio.getSyncState());
@@ -228,6 +277,8 @@ final class RadioUi {
         boolean auto = radio.isAutoSync();
         barValue.setText(formatSeconds(auto ? radio.getAdjustMs() : radio.getTargetDelayMs(), auto));
         barValueLabel.setText(auto ? t("correctie", "correction") : t("vertraging", "delay"));
+        barRadio.setText(radio.isEnabled() ? t("Radio: aan", "Radio: on") : t("Radio: uit", "Radio: off"));
+        barResync.setText(radio.isResyncing() ? t("Bezig met syncen…", "Syncing…") : t("Opnieuw syncen", "Sync again"));
     }
 
     private LinearLayout buildBar(Context c) {
@@ -253,7 +304,7 @@ final class RadioUi {
         b.addView(titleColumn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         // Left = more delay (radio later), right = less delay (radio earlier)
-        barLater = button(c, "◀  " + t("Meer vertraging", "More delay"), true);
+        barLater = button(c, "◀  " + t("Meer", "More"), true);
         barLater.setOnClickListener(v -> nudge(RadioPatch.STEP_MS));
         b.addView(barLater, buttonParams(c, ViewGroup.LayoutParams.WRAP_CONTENT, 42));
 
@@ -267,7 +318,7 @@ final class RadioUi {
         valueColumn.addView(barValueLabel);
         b.addView(valueColumn, new LinearLayout.LayoutParams(dp(c, 92), ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        TextView earlier = button(c, t("Minder vertraging", "Less delay") + "  ▶", true);
+        TextView earlier = button(c, t("Minder", "Less") + "  ▶", true);
         earlier.setOnClickListener(v -> nudge(-RadioPatch.STEP_MS));
         b.addView(earlier, buttonParams(c, ViewGroup.LayoutParams.WRAP_CONTENT, 42));
 
@@ -276,6 +327,22 @@ final class RadioUi {
         LinearLayout.LayoutParams dividerParams = new LinearLayout.LayoutParams(dp(c, 1), dp(c, 36));
         dividerParams.setMargins(dp(c, 10), 0, dp(c, 4), 0);
         b.addView(divider, dividerParams);
+
+        barRadio = button(c, "", true);
+        barRadio.setOnClickListener(v -> {
+            radio.setEnabled(!radio.isEnabled());
+            barVisibleUntilMs = SystemClock.elapsedRealtime() + BAR_FORCED_MS;
+            refreshBar(radio.getSyncState());
+        });
+        b.addView(barRadio, buttonParams(c, ViewGroup.LayoutParams.WRAP_CONTENT, 42));
+
+        barResync = button(c, "", true);
+        barResync.setOnClickListener(v -> {
+            radio.resync();
+            barVisibleUntilMs = SystemClock.elapsedRealtime() + BAR_FORCED_MS;
+            refreshBar(radio.getSyncState());
+        });
+        b.addView(barResync, buttonParams(c, ViewGroup.LayoutParams.WRAP_CONTENT, 42));
 
         TextView more = button(c, t("Meer opties", "More options"), false);
         more.setOnClickListener(v -> openPanel());
@@ -297,6 +364,7 @@ final class RadioUi {
     }
 
     private void openPanel() {
+        panelLastInputMs = SystemClock.elapsedRealtime();
         bar.setVisibility(View.GONE);
         panel.setVisibility(View.VISIBLE);
         refreshPanel(radio.getSyncState());
@@ -405,10 +473,28 @@ final class RadioUi {
         });
         p.addView(radioRow, sized(c, ViewGroup.LayoutParams.MATCH_PARENT, 40, 2));
 
+        panelReconnect = button(c, t("Radio opnieuw verbinden", "Reconnect radio"), false);
+        panelReconnect.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        panelReconnect.setOnClickListener(v -> {
+            radio.reconnect();
+            refreshPanel(radio.getSyncState());
+        });
+        p.addView(panelReconnect, sized(c, ViewGroup.LayoutParams.MATCH_PARENT, 40, 2));
+        TextView resyncRow = button(c, t("Opnieuw syncen", "Sync again"), false);
+        resyncRow.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        resyncRow.setOnClickListener(v -> {
+            radio.resync();
+            closePanel();
+        });
+        p.addView(resyncRow, sized(c, ViewGroup.LayoutParams.MATCH_PARENT, 40, 2));
+        panelClose = button(c, t("Sluiten", "Close"), true);
+        panelClose.setOnClickListener(v -> closePanel());
+        p.addView(panelClose, sized(c, ViewGroup.LayoutParams.MATCH_PARENT, 42, 10));
+
         View spacer = new View(c);
         p.addView(spacer, new LinearLayout.LayoutParams(1, 0, 1f));
-        p.addView(text(c, t("Terug = sluiten · OK lang ingedrukt opent de radiobalk",
-                "Back = close · long-press OK opens the radio bar"), 10, DIM, false));
+        p.addView(text(c, t("Terug of MENU = sluiten · sluit ook vanzelf",
+                "Back or MENU = close · also closes by itself"), 10, DIM, false));
         return p;
     }
 
@@ -760,12 +846,15 @@ final class RadioUi {
             setBackground(bg);
             LinearLayout texts = new LinearLayout(c);
             texts.setOrientation(VERTICAL);
+            texts.setDuplicateParentStateEnabled(true);
             ColorStateList textColors = new ColorStateList(new int[][]{{android.R.attr.state_focused}, {}}, new int[]{DARK, TEXT});
             label = text(c, text, 12, TEXT, false);
             label.setTextColor(textColors);
             label.setDuplicateParentStateEnabled(true);
             texts.addView(label);
             subtitle = text(c, "", 10, AMBER, false);
+            subtitle.setTextColor(new ColorStateList(new int[][]{{android.R.attr.state_focused}, {}}, new int[]{0xFF8A5A00, AMBER}));
+            subtitle.setDuplicateParentStateEnabled(true);
             subtitle.setVisibility(GONE);
             texts.addView(subtitle);
             addView(texts, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
