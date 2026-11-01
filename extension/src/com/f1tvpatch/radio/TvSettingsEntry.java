@@ -5,39 +5,41 @@ import android.app.Application;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Resources;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.os.Bundle;
 import android.util.Log;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewTreeObserver;
-import android.widget.ImageView;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import java.util.Map;
 import java.util.WeakHashMap;
 
 /**
- * Puts the patch's entry on F1TV's TV settings page (AccountSettingsFragment in 3.0.x), looking and
- * focusing like F1TV's own buttons.
+ * Puts the patch's entry next to F1TV's TV settings page (AccountSettingsFragment in 3.0.x).
  *
- * That page is a ConstraintLayout of button containers chained top-to-bottom, with the contact
- * links hanging below the last one. Adding a view to the chain (or editing its constraints) broke
- * the page, so the entry reuses the last container instead: F1TV ships a fourth one, hidden unless
- * "enhanced audio" is on offer, with the same layout, focus order and spacing as the others. It is
- * shown, retitled and given our click handler. If F1TV shows it for a real feature the patch backs
- * off and leaves the page alone.
- *
- * Containers and their parts are looked up by resource name, so an F1TV redesign makes the entry
- * go missing instead of crashing the page.
+ * That page is a ConstraintLayout of full-width button rows chained top to bottom, with the contact
+ * links hanging below the last one. Adding to that chain broke the page, and reusing its hidden
+ * fourth row clashed with F1TV's own "enhanced audio" row once that shows up. So nothing of F1TV's
+ * layout is touched: a card is overlaid in the empty area to the right of the rows, level with the
+ * first one. D-pad right from a row reaches it, left goes back. The card is only visible while that
+ * page is, found by its row ids (by name), so an F1TV redesign makes the card go missing instead of
+ * crashing anything.
  */
 public final class TvSettingsEntry {
     private TvSettingsEntry() { }
 
     private static final String TAG = RadioEngine.TAG;
-    private static final String MARKER = "f1tvpatch_settings_entry";
+    private static final Map<View, View> CARDS = new WeakHashMap<>();
     private static final Map<View, Boolean> WATCHED = new WeakHashMap<>();
 
-    /** From {@link Launch}: watches every F1TV screen and fills the slot whenever the page shows. */
+    /** From {@link Launch}: watches every F1TV screen for the settings page. */
     static void install(Activity launcher) {
         launcher.getApplication().registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
             @Override public void onActivityResumed(Activity a) { watch(a); }
@@ -60,91 +62,107 @@ public final class TvSettingsEntry {
         final String pkg = activity.getPackageName();
         decor.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
             try {
-                fill(decor, res, pkg);
+                update(activity, decor, res, pkg);
             } catch (Throwable t) {
-                Log.w(TAG, "could not add the settings entry", t);
+                Log.w(TAG, "settings entry failed", t);
             }
         });
     }
 
-    private static void fill(View decor, Resources res, String pkg) {
-        int probe = res.getIdentifier("language_layout_container", "id", pkg);
-        View first = probe != 0 ? decor.findViewById(probe) : null;
-        if (first == null || !(first.getParent() instanceof ViewGroup)) return;
-        ViewGroup page = (ViewGroup) first.getParent();
-
-        // The last button container in layout order
-        ViewGroup slot = null;
-        for (int i = 0; i < page.getChildCount(); i++) {
-            View child = page.getChildAt(i);
-            if (child instanceof ViewGroup && child.getId() != View.NO_ID && child.isFocusable() && isButtonContainer(child, res)) {
-                slot = (ViewGroup) child;
-            }
+    private static void update(Activity activity, View decor, Resources res, String pkg) {
+        int rowId = res.getIdentifier("profile_layout_container", "id", pkg);
+        View row = rowId != 0 ? decor.findViewById(rowId) : null;
+        boolean pageShown = row != null && row.isShown() && row.getWidth() > 0;
+        View card = CARDS.get(decor);
+        if (!pageShown) {
+            if (card != null) card.setVisibility(View.GONE);
+            return;
         }
-        if (slot == null) return;
-
-        boolean ours = MARKER.equals(slot.getTag());
-        if (!ours && slot.getVisibility() == View.VISIBLE) return; // F1TV uses it for a real feature
-
-        TextView title = text(slot, res, pkg, "title");
-        TextView description = text(slot, res, pkg, "description");
-        TextView button = text(slot, res, pkg, "button");
-        if (title == null || button == null) return;
-
-        String titleText = Config.STREAM_URL.isEmpty() ? Updater.t("Patch-instellingen", "Patch settings") : "Custom radio";
-        String descriptionText = Config.STREAM_URL.isEmpty()
-                ? Updater.t("Automatisch inloggen en updates van de gepatchte app.", "Automatic sign-in and updates of the patched app.")
-                : Updater.t("Radio in plaats van het F1-commentaar, synchronisatie, automatisch inloggen en updates.",
-                        "Radio instead of the F1 commentary, sync, automatic sign-in and updates.");
-        String buttonText = Updater.t("OPENEN", "OPEN");
-
-        // F1TV re-applies its own texts when its data changes: put ours back whenever they differ
-        boolean changed = !ours
-                || slot.getVisibility() != View.VISIBLE
-                || !titleText.contentEquals(title.getText())
-                || !buttonText.contentEquals(button.getText())
-                || (description != null && !descriptionText.contentEquals(description.getText()));
-        if (!changed) return;
-
-        slot.setTag(MARKER);
-        slot.setVisibility(View.VISIBLE);
-        title.setText(titleText);
-        if (description != null) description.setText(descriptionText);
-        button.setText(buttonText);
-        setIcon(slot, res, pkg);
-        View.OnClickListener open = v -> {
-            Context c = v.getContext();
-            c.startActivity(new Intent(c, PatchSettingsActivity.class));
-        };
-        slot.setOnClickListener(open);
-        button.setOnClickListener(open);
-        if (!ours) Log.i(TAG, "settings entry added to F1TV's settings page");
+        FrameLayout host = decor.findViewById(android.R.id.content);
+        if (host == null) return;
+        if (card == null || card.getParent() != host) {
+            card = build(activity);
+            CARDS.put(decor, card);
+            host.addView(card, new FrameLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START));
+            Log.i(TAG, "settings card added next to F1TV's settings page");
+        }
+        // Level with the first row, right of the rows, inside the screen
+        int[] rowPos = new int[2];
+        int[] hostPos = new int[2];
+        row.getLocationOnScreen(rowPos);
+        host.getLocationOnScreen(hostPos);
+        int left = rowPos[0] - hostPos[0] + row.getWidth() + dp(activity, 24);
+        int width = Math.min(dp(activity, 300), host.getWidth() - left - dp(activity, 24));
+        if (width < dp(activity, 180)) {
+            card.setVisibility(View.GONE); // no room on this screen size
+            return;
+        }
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) card.getLayoutParams();
+        int top = rowPos[1] - hostPos[1];
+        if (lp.leftMargin != left || lp.topMargin != top || lp.width != width) {
+            lp.leftMargin = left;
+            lp.topMargin = top;
+            lp.width = width;
+            card.setLayoutParams(lp);
+        }
+        card.setVisibility(View.VISIBLE);
     }
 
-    private static boolean isButtonContainer(View view, Resources res) {
-        try {
-            return res.getResourceEntryName(view.getId()).endsWith("_layout_container");
-        } catch (Resources.NotFoundException e) {
-            return false;
-        }
+    private static View build(Activity activity) {
+        final Context c = activity;
+        boolean radio = !Config.STREAM_URL.isEmpty();
+        LinearLayout card = new LinearLayout(c);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setFocusable(true);
+        card.setClickable(true);
+        card.setPadding(dp(c, 18), dp(c, 16), dp(c, 18), dp(c, 16));
+
+        TextView title = text(c, radio ? "CUSTOM RADIO" : t("PATCH-INSTELLINGEN", "PATCH SETTINGS"), 15, 0xFFF2F3F5, true);
+        TextView body = text(c, radio
+                ? t("Radio i.p.v. het F1-commentaar, synchronisatie, inloggen en updates.",
+                        "Radio instead of the F1 commentary, sync, sign-in and updates.")
+                : t("Automatisch inloggen en updates van de gepatchte app.",
+                        "Automatic sign-in and updates of the patched app."), 12, 0xFFB4B9C2, false);
+        body.setPadding(0, dp(c, 8), 0, dp(c, 12));
+        TextView open = text(c, t("OPENEN", "OPEN"), 13, 0xFFFFFFFF, true);
+        open.setGravity(Gravity.CENTER);
+        GradientDrawable pill = new GradientDrawable();
+        pill.setColor(0xFFE10600);
+        pill.setCornerRadius(dp(c, 8));
+        open.setBackground(pill);
+        card.addView(title);
+        card.addView(body);
+        card.addView(open, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(c, 38)));
+
+        StateListDrawable bg = new StateListDrawable();
+        GradientDrawable focused = new GradientDrawable();
+        focused.setColor(0xFF2A2E38);
+        focused.setCornerRadius(dp(c, 10));
+        focused.setStroke(dp(c, 3), 0xFFF2F3F5);
+        GradientDrawable idle = new GradientDrawable();
+        idle.setColor(0xFF1C1F26);
+        idle.setCornerRadius(dp(c, 10));
+        bg.addState(new int[]{android.R.attr.state_focused}, focused);
+        bg.addState(new int[]{}, idle);
+        card.setBackground(bg);
+        card.setOnClickListener(v -> v.getContext().startActivity(new Intent(v.getContext(), PatchSettingsActivity.class)));
+        return card;
     }
 
-    private static TextView text(View parent, Resources res, String pkg, String idName) {
-        int id = res.getIdentifier(idName, "id", pkg);
-        View v = id != 0 ? parent.findViewById(id) : null;
-        return v instanceof TextView ? (TextView) v : null;
+    private static TextView text(Context c, String value, float sp, int color, boolean bold) {
+        TextView v = new TextView(c);
+        v.setText(value);
+        v.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        v.setTextColor(color);
+        if (bold) v.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        return v;
     }
 
-    private static void setIcon(View parent, Resources res, String pkg) {
-        int id = res.getIdentifier("icon", "id", pkg);
-        View v = id != 0 ? parent.findViewById(id) : null;
-        if (!(v instanceof ImageView)) return;
-        for (String name : new String[]{"ic_team_radio_tv_inactive", "audio_track_icon_white", "ic_enhanced_audio"}) {
-            int drawable = res.getIdentifier(name, "drawable", pkg);
-            if (drawable != 0) {
-                ((ImageView) v).setImageResource(drawable);
-                return;
-            }
-        }
+    private static int dp(Context c, float value) {
+        return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value, c.getResources().getDisplayMetrics()));
+    }
+
+    private static String t(String nl, String en) {
+        return Updater.t(nl, en);
     }
 }

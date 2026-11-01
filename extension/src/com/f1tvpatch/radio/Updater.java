@@ -67,7 +67,12 @@ public final class Updater {
     private static int startedActivities;
     /** The app just came to the foreground: show the pending update once on the next suitable screen. */
     private static boolean offerDue;
-    private static boolean offerShowing;
+    private static AlertDialog offerDialog;
+
+    /** A dialog on a screen that closed (splash -> home) never reports dismissal: check the window itself. */
+    private static boolean isOfferShowing() {
+        return offerDialog != null && offerDialog.isShowing();
+    }
     private static boolean checkRunning;
 
     static final class Release {
@@ -139,7 +144,7 @@ public final class Updater {
 
     private static boolean isPlayerScreen(Activity a) {
         String name = a.getClass().getSimpleName().toLowerCase(Locale.ROOT);
-        return name.contains("player") || a instanceof PatchSettingsActivity;
+        return name.contains("player") || name.contains("splash") || a instanceof PatchSettingsActivity;
     }
 
     private static void onScreen(Activity activity) {
@@ -150,7 +155,7 @@ public final class Updater {
             if (System.currentTimeMillis() - prefs.getLong(KEY_LAST_CHECK, 0L) >= CHECK_INTERVAL_MS) {
                 check(activity, false);
             }
-            if (offerDue && !offerShowing) {
+            if (offerDue && !isOfferShowing()) {
                 Release pending = pendingRelease(activity);
                 if (pending != null && isNewer(pending)) {
                     offerDue = false;
@@ -225,7 +230,7 @@ public final class Updater {
                     return;
                 }
                 rememberPending(app, found);
-                if (target == null || target.isFinishing() || offerShowing) return;
+                if (target == null || target.isFinishing() || isOfferShowing()) return;
                 if (userInitiated) {
                     offer(target, found);
                 } else if (offerDue && !isPlayerScreen(target) && prefs(app).getBoolean(KEY_AUTO_UPDATE, true)) {
@@ -285,8 +290,7 @@ public final class Updater {
     }
 
     private static void offer(Activity activity, Release release) {
-        if (offerShowing) return;
-        offerShowing = true;
+        if (isOfferShowing()) return;
         boolean permitted = canInstall(activity);
         String message = String.format(Locale.getDefault(),
                 t("%s is beschikbaar.\nNu geïnstalleerd: %s.\n\nJe blijft ingelogd en je instellingen blijven bewaard.",
@@ -309,7 +313,7 @@ public final class Updater {
                             "Update notices are off. Turn them back on in Settings > Custom radio > Updates."));
                 })
                 .create();
-        dialog.setOnDismissListener(d -> offerShowing = false);
+        offerDialog = dialog;
         dialog.show();
         android.widget.Button positive = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
         if (positive != null) positive.requestFocus();
