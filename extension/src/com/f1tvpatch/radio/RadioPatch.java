@@ -55,11 +55,15 @@ public final class RadioPatch {
     private static final long ACOUSTIC_INTERVAL_MS = 5_000L;
     // Correlation strength / peak-vs-runner-up needed before trusting an acoustic estimate.
     // Real matches on live sessions score 0.27-0.52 with a peak ratio of 2-7; chance matches on
-    // commentary-only stretches reached 0.13 / 1.34 and moved the radio 10 s off. Logged with every
-    // estimate so these can be tuned further.
-    private static final double ACOUSTIC_MIN_SCORE = 0.25;
-    private static final double ACOUSTIC_MIN_PEAK_RATIO = 2.0;
-    // Lags this close to the search limit are mostly edge artefacts of the correlation
+    // commentary-only stretches reached 0.13 / 1.34 and, at the 10 s search edge, moved the radio 10 s
+    // off (2026-10-24 quali). Thresholds of 0.25 / 2.0 on top of that never let it correct at all
+    // (2026-11-01 race). So: a moderate bar, no edge lags, two independent agreeing estimates, and a
+    // clearly strong estimate is applied on its own. Logged so these can be tuned further.
+    private static final double ACOUSTIC_MIN_SCORE = 0.15;
+    private static final double ACOUSTIC_MIN_PEAK_RATIO = 1.4;
+    private static final double ACOUSTIC_STRONG_SCORE = 0.30;
+    private static final double ACOUSTIC_STRONG_PEAK_RATIO = 2.5;
+    // Lags this close to the search limit are mostly edge artefacts
     private static final long ACOUSTIC_EDGE_MARGIN_MS = 1_500L;
     // Two estimates must agree this closely before the adjustment is changed...
     private static final long ACOUSTIC_AGREEMENT_MS = 250L;
@@ -603,15 +607,17 @@ public final class RadioPatch {
         }
         AcousticCorrelator.Estimate previous = pendingEstimate;
         long now = SystemClock.elapsedRealtime();
-        if (previous == null || Math.abs(previous.lagMs - estimate.lagMs) > ACOUSTIC_AGREEMENT_MS) {
+        boolean strong = estimate.score >= ACOUSTIC_STRONG_SCORE && estimate.peakRatio >= ACOUSTIC_STRONG_PEAK_RATIO;
+        boolean agrees = previous != null && Math.abs(previous.lagMs - estimate.lagMs) <= ACOUSTIC_AGREEMENT_MS;
+        if (!strong && !agrees) {
             pendingEstimate = estimate;
             pendingEstimateAtMs = now;
             return;
         }
         // Agrees, but measured on (largely) the same audio: wait for an independent confirmation
-        if (now - pendingEstimateAtMs < ACOUSTIC_INDEPENDENT_MS) return;
+        if (!strong && now - pendingEstimateAtMs < ACOUSTIC_INDEPENDENT_MS) return;
         pendingEstimate = null;
-        long lagMs = (previous.lagMs + estimate.lagMs) / 2;
+        long lagMs = agrees ? (previous.lagMs + estimate.lagMs) / 2 : estimate.lagMs;
         // Radio heard lagMs after the F1 audio: take that much off its delay
         setAdjust(adjustMs - lagMs);
         lastAcousticCheckAtMs = SystemClock.elapsedRealtime();

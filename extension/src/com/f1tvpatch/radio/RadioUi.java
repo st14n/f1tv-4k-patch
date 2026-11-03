@@ -19,6 +19,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.lang.ref.WeakReference;
@@ -35,7 +36,7 @@ import java.util.Locale;
  *   <li>notices at the top right for what happens automatically;</li>
  *   <li>a side panel ("More options") with the full status and switches.</li>
  * </ul>
- * Long-press OK opens the bar from anywhere. Built in code: the patch ships no resources.
+ * The bar shows with F1's own controls (OK), reached with D-pad up; long-press OK / MENU also open it. Built in code: the patch ships no resources.
  */
 final class RadioUi {
     enum Notice { IN_SYNC, ACOUSTIC_ADJUSTED, BUFFER_EXCEEDED, RESYNC_STARTED, RESYNC_OK, RESYNC_FAILED }
@@ -153,9 +154,14 @@ final class RadioUi {
         }
 
         // D-pad up from the top of F1's controls moves into the bar
-        if (down && code == KeyEvent.KEYCODE_DPAD_UP && bar != null && bar.getVisibility() == View.VISIBLE && focus != null) {
-            View next = FocusFinder.getInstance().findNextFocus((ViewGroup) activity.getWindow().getDecorView(), focus, View.FOCUS_UP);
-            if (next == null || isDescendant(next, bar)) {
+        // (F1 routes keys to its controls itself, so nothing may hold focus: that counts as the top too)
+        if (down && code == KeyEvent.KEYCODE_DPAD_UP && bar != null && bar.getVisibility() == View.VISIBLE) {
+            boolean atTop = focus == null;
+            if (!atTop) {
+                View next = FocusFinder.getInstance().findNextFocus((ViewGroup) activity.getWindow().getDecorView(), focus, View.FOCUS_UP);
+                atTop = next == null || isDescendant(next, bar);
+            }
+            if (atTop) {
                 rememberFocus(focus);
                 barLater.requestFocus();
                 return true;
@@ -202,7 +208,7 @@ final class RadioUi {
         switch (notice) {
             case IN_SYNC:
                 addNotice(Icon.CHECK, t("Radio synchroon met het beeld", "Radio in sync with the picture"),
-                        t("Lang OK voor radio-instellingen.", "Long-press OK for radio settings."));
+                        t("OK, dan pijl omhoog voor de radio.", "Press OK, then up for the radio."));
                 break;
             case ACOUSTIC_ADJUSTED:
                 long ms = valueMs == null ? 0L : valueMs;
@@ -399,10 +405,10 @@ final class RadioUi {
         LinearLayout p = new LinearLayout(c);
         p.setOrientation(LinearLayout.VERTICAL);
         p.setBackgroundColor(BG);
-        p.setPadding(dp(c, 30), dp(c, 30), dp(c, 30), dp(c, 24));
+        p.setPadding(dp(c, 22), dp(c, 18), dp(c, 22), dp(c, 18));
 
         p.addView(text(c, t("AUDIO", "AUDIO"), 10, DIM, true));
-        TextView title = text(c, "Custom radio", 30, TEXT, true);
+        TextView title = text(c, "Custom radio", 24, TEXT, true);
         title.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
         p.addView(title);
         p.addView(text(c, t("Live · vervangt het F1-commentaar", "Live · replaces the F1 commentary"), 11, DIM, false));
@@ -410,7 +416,7 @@ final class RadioUi {
         LinearLayout card = new LinearLayout(c);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setBackground(rounded(CARD, dp(c, 10)));
-        card.setPadding(dp(c, 15), dp(c, 14), dp(c, 15), dp(c, 14));
+        card.setPadding(dp(c, 14), dp(c, 10), dp(c, 14), dp(c, 10));
         LinearLayout statusRow = new LinearLayout(c);
         statusRow.setGravity(Gravity.CENTER_VERTICAL);
         panelDot = dot(c, GREEN, 9);
@@ -423,15 +429,15 @@ final class RadioUi {
         panelStatusText.setPadding(0, dp(c, 6), 0, dp(c, 8));
         card.addView(panelStatusText);
         timeline = new TimelineView(c);
-        card.addView(timeline, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(c, 46)));
-        p.addView(card, marginTop(c, 18));
+        card.addView(timeline, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(c, 42)));
+        p.addView(card, marginTop(c, 12));
 
         LinearLayout adjustHeader = new LinearLayout(c);
         adjustHeader.addView(text(c, t("Bijstellen", "Adjust"), 11, TEXT, true),
                 new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         panelValue = text(c, "", 11, DIM, false);
         adjustHeader.addView(panelValue);
-        p.addView(adjustHeader, marginTop(c, 18));
+        p.addView(adjustHeader, marginTop(c, 12));
 
         LinearLayout nudges = new LinearLayout(c);
         TextView later = button(c, "◀  " + t("Meer vertraging", "More delay"), true);
@@ -450,7 +456,7 @@ final class RadioUi {
             radio.setAutoSync(!radio.isAutoSync());
             refreshPanel(radio.getSyncState());
         });
-        p.addView(autoRow, marginTop(c, 14));
+        p.addView(autoRow, marginTop(c, 8));
         acousticRow = new SwitchRow(c, t("Afstemmen op circuitgeluid", "Match to circuit sound"));
         acousticRow.setOnClickListener(v -> {
             if (!radio.isAutoSync()) return;
@@ -491,11 +497,17 @@ final class RadioUi {
         panelClose.setOnClickListener(v -> closePanel());
         p.addView(panelClose, sized(c, ViewGroup.LayoutParams.MATCH_PARENT, 42, 10));
 
-        View spacer = new View(c);
-        p.addView(spacer, new LinearLayout.LayoutParams(1, 0, 1f));
-        p.addView(text(c, t("Terug of MENU = sluiten · sluit ook vanzelf",
-                "Back or MENU = close · also closes by itself"), 10, DIM, false));
-        return p;
+        // Taller than the screen: the content scrolls and focus brings the focused row into view
+        ScrollView scroll = new ScrollView(c);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setFocusable(false);
+        scroll.setFillViewport(true);
+        scroll.addView(p, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout outer = new LinearLayout(c);
+        outer.setOrientation(LinearLayout.VERTICAL);
+        outer.setBackgroundColor(BG);
+        outer.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        return outer;
     }
 
     // ── Notices ──────────────────────────────────────────────────────────────
@@ -660,7 +672,7 @@ final class RadioUi {
         root.addView(notices, noticeParams);
 
         panel = buildPanel(activity);
-        FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(dp(activity, 366), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END);
+        FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(dp(activity, 340), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END);
         root.addView(panel, panelParams);
         panel.setVisibility(View.GONE);
 

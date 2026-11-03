@@ -132,8 +132,8 @@ public final class PatchSettingsActivity extends Activity {
         list.addView(accent, accentParams);
         if (hasRadio) {
             list.addView(text(t("Wijzigingen gelden vanaf de volgende keer dat je iets afspeelt. Tijdens live kijken: "
-                            + "lang op OK, MENU of een gekleurde toets opent de radiobalk.",
-                    "Changes apply from the next playback. While watching live: long-press OK, MENU or a colour key opens the radio bar."),
+                            + "OK opent F1's bediening met de radiobalk erboven (pijl omhoog); lang OK of MENU kan ook.",
+                    "Changes apply from the next playback. While watching live: OK opens F1's controls with the radio bar above them (press up); long-press OK or MENU works too."),
                     14, MUTED, false));
         }
 
