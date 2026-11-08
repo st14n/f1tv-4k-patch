@@ -15,6 +15,11 @@ on:
         required: false
         type: boolean
         default: false
+      test_build:
+        description: "Mark the release as a test build (adds a notice to the title and the notes)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -570,6 +575,12 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
+          TEST_NOTE=""
+          if [[ "${{ inputs.test_build }}" == "true" ]]; then
+            TITLE="${TITLE} (test build)"
+            TEST_NOTE="> **Test build, for testing only.** This build has new, not yet field-tested changes to the radio sync: the circuit sound is measured against F1's FX audio track, measurements are combined over time before the sync moves, a missing video clock falls back to a learned base lag, and the radio bar has a \"Locked in\" button. Expect rough edges and please report what you see."
+          fi
+
           # Delete existing release if force-rebuilding
           if [[ "${{ inputs.force }}" == "true" ]]; then
             gh release delete "${TAG}" --yes 2>/dev/null || true
@@ -594,6 +605,8 @@ jobs:
             --target "${BRANCH}" \
             ${PRERELEASE_FLAG} \
             --notes "$(cat <<NOTES
+          ${TEST_NOTE}
+
           Patched F1TV Android TV app. The UHD/4K compatibility patch lets the app use the UHD streams on devices that support them but are not on F1's device list; your subscription, F1's servers and the DRM are unchanged.
 
           **Version:** \`${{ needs.check.outputs.version }}\`
