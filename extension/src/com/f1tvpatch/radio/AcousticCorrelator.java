@@ -14,11 +14,52 @@ final class AcousticCorrelator {
         final long lagMs;
         final double score;
         final double peakRatio;
+        /** The whole correlation curve over the lags (null for an integrated result). */
+        final double[] correlation;
 
-        Estimate(long lagMs, double score, double peakRatio) {
+        Estimate(long lagMs, double score, double peakRatio, double[] correlation) {
             this.lagMs = lagMs;
             this.score = score;
             this.peakRatio = peakRatio;
+            this.correlation = correlation;
+        }
+    }
+
+    /**
+     * Adds successive correlation curves. The shared circuit sound gives the same peak every time,
+     * chance matches land on different lags and average out, so the combined curve is far more
+     * reliable than any single estimate. Recent curves weigh more (decay), so a drift still shows.
+     */
+    static final class Accumulator {
+        private static final double DECAY = 0.93;
+        private double[] sum;
+        private double weight;
+        int count;
+
+        void reset() {
+            sum = null;
+            weight = 0;
+            count = 0;
+        }
+
+        void add(Estimate estimate) {
+            if (estimate.correlation == null) return;
+            if (sum == null || sum.length != estimate.correlation.length) {
+                sum = new double[estimate.correlation.length];
+                weight = 0;
+                count = 0;
+            }
+            for (int i = 0; i < sum.length; i++) sum[i] = sum[i] * DECAY + estimate.correlation[i];
+            weight = weight * DECAY + 1;
+            count++;
+        }
+
+        /** The peak of the combined curve, or null when nothing was added yet. */
+        Estimate result() {
+            if (sum == null || count == 0) return null;
+            double[] mean = new double[sum.length];
+            for (int i = 0; i < sum.length; i++) mean[i] = sum[i] / weight;
+            return analyze(mean, AcousticFeatures.HOP_MS, (sum.length - 1) / 2, null);
         }
     }
 
@@ -76,6 +117,11 @@ final class AcousticCorrelator {
             }
         }
 
+        return analyze(correlation, hop, maxLag, correlation);
+    }
+
+    /** Peak position (with sub-hop interpolation), its height and how much it stands out. */
+    static Estimate analyze(double[] correlation, long hop, int maxLag, double[] keep) {
         int best = 0;
         for (int i = 0; i < correlation.length; i++) if (correlation[i] > correlation[best]) best = i;
         int exclusion = (int) (SECOND_PEAK_EXCLUSION_MS / hop);
@@ -83,7 +129,6 @@ final class AcousticCorrelator {
         for (int i = 0; i < correlation.length; i++) {
             if (Math.abs(i - best) > exclusion && correlation[i] > second) second = correlation[i];
         }
-        // Parabolic interpolation around the peak for sub-hop precision
         double offset = 0;
         if (best > 0 && best < correlation.length - 1) {
             double y0 = correlation[best - 1];
@@ -94,7 +139,7 @@ final class AcousticCorrelator {
         }
         long lagMs = Math.round((best - maxLag + offset) * hop);
         double ratio = second > 0 ? correlation[best] / second : Double.POSITIVE_INFINITY;
-        return new Estimate(lagMs, correlation[best], ratio);
+        return new Estimate(lagMs, correlation[best], ratio, keep);
     }
 
     private static double coverage(float[][] grid) {

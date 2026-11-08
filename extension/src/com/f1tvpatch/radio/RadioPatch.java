@@ -140,10 +140,10 @@ public final class RadioPatch {
         activityRef = new WeakReference<>(activity);
         prefs = activity.getSharedPreferences(PREFS, Activity.MODE_PRIVATE);
         enabled = prefs.getBoolean(KEY_ENABLED, Config.DEFAULT_ENABLED);
-        autoSync = prefs.getBoolean(KEY_AUTO_SYNC, true);
+        autoSync = true; // the radio always follows the picture; the switch only turns it off for this session
         adjustMs = prefs.getLong(KEY_ADJUST_MS, Config.DEFAULT_ADJUST_MS);
         manualDelayMs = prefs.getLong(KEY_MANUAL_DELAY_MS, Config.FALLBACK_DELAY_MS);
-        acoustic = prefs.getBoolean(KEY_ACOUSTIC, false);
+        acoustic = prefs.getBoolean(KEY_ACOUSTIC, true);
         ui = new RadioUi(activity, this);
     }
 
@@ -567,6 +567,7 @@ public final class RadioPatch {
     private void markAlignmentChanged() {
         lastAlignmentChangeAtMs = SystemClock.elapsedRealtime() + ALIGNMENT_SETTLE_MS;
         pendingEstimate = null;
+        accumulator.reset();
     }
 
     private long nextAcousticLogAtMs;
@@ -607,57 +608,53 @@ public final class RadioPatch {
         });
     }
 
+    private final AcousticCorrelator.Accumulator accumulator = new AcousticCorrelator.Accumulator();
+    private long lastAcousticApplyAtMs;
+    // Combined evidence needed before moving the radio: this many curves, a clear peak that stands
+    // out, nowhere near the search edge; far corrections need more. A "sync again" asks for less.
+    private static final int INTEGRATED_MIN_COUNT = 8;
+    private static final int RESYNC_MIN_COUNT = 4;
+    private static final double INTEGRATED_MIN_SCORE = 0.10;
+    private static final double INTEGRATED_MIN_RATIO = 1.6;
+    private static final double RESYNC_MIN_RATIO = 1.4;
+    private static final double FAR_MIN_RATIO = 2.2;
+    private static final long FAR_LAG_MS = 5_000L;
+    private static final long MIN_APPLY_INTERVAL_MS = 60_000L;
+
     private void onAcousticEstimate(AcousticCorrelator.Estimate estimate, double notBeforeMs) {
         // The alignment changed while this was computing: it describes audio that no longer applies
         if (lastAlignmentChangeAtMs != notBeforeMs || acousticSuspended || !autoSync) return;
-        boolean confident = estimate.score >= ACOUSTIC_MIN_SCORE && estimate.peakRatio >= ACOUSTIC_MIN_PEAK_RATIO
-                && Math.abs(estimate.lagMs) <= AcousticCorrelator.MAX_LAG_MS - ACOUSTIC_EDGE_MARGIN_MS;
-        Log.i(TAG, String.format(Locale.ROOT, "acoustic estimate lagMs=%d score=%.3f peakRatio=%.2f confident=%b",
-                estimate.lagMs, estimate.score, estimate.peakRatio, confident));
-        boolean resyncing = SystemClock.elapsedRealtime() < resyncUntilMs;
+        long now = SystemClock.elapsedRealtime();
+        boolean resyncing = now < resyncUntilMs;
+        accumulator.add(estimate);
+        AcousticCorrelator.Estimate total = accumulator.result();
+        if (total == null) return;
+        Log.i(TAG, String.format(Locale.ROOT, "acoustic now lag=%d score=%.3f ratio=%.2f | combined n=%d lag=%d score=%.3f ratio=%.2f",
+                estimate.lagMs, estimate.score, estimate.peakRatio, accumulator.count, total.lagMs, total.score, total.peakRatio));
+        long lag = total.lagMs;
+        double minRatio = Math.abs(lag) > FAR_LAG_MS ? FAR_MIN_RATIO : (resyncing ? RESYNC_MIN_RATIO : INTEGRATED_MIN_RATIO);
+        boolean confident = accumulator.count >= (resyncing ? RESYNC_MIN_COUNT : INTEGRATED_MIN_COUNT)
+                && total.score >= INTEGRATED_MIN_SCORE && total.peakRatio >= minRatio
+                && Math.abs(lag) <= AcousticCorrelator.MAX_LAG_MS - ACOUSTIC_EDGE_MARGIN_MS;
         if (!confident) return;
-        if (Math.abs(estimate.lagMs) < ACOUSTIC_DEADBAND_MS) {
-            pendingEstimate = null;
-            lastAcousticCheckAtMs = SystemClock.elapsedRealtime();
+        if (Math.abs(lag) < ACOUSTIC_DEADBAND_MS) {
+            accumulator.reset();
+            lastAcousticCheckAtMs = now;
             if (resyncing) {
                 resyncUntilMs = 0L;
                 resyncNoticePending = false;
-                ui.notify(RadioUi.Notice.RESYNC_OK, estimate.lagMs);
+                ui.notify(RadioUi.Notice.RESYNC_OK, lag);
             }
             return;
         }
-        if (resyncing) {
-            // Explicit request: a single estimate that passes the strict thresholds is enough
-            resyncUntilMs = 0L;
-            resyncNoticePending = false;
-            pendingEstimate = null;
-            setAdjust(adjustMs - estimate.lagMs);
-            lastAcousticCheckAtMs = SystemClock.elapsedRealtime();
-            Log.i(TAG, "resync correction lagMs=" + estimate.lagMs + " adjustMs=" + adjustMs);
-            ui.notify(RadioUi.Notice.ACOUSTIC_ADJUSTED, -estimate.lagMs);
-            return;
-        }
-        AcousticCorrelator.Estimate previous = pendingEstimate;
-        long now = SystemClock.elapsedRealtime();
-        boolean strong = estimate.score >= ACOUSTIC_STRONG_SCORE && estimate.peakRatio >= ACOUSTIC_STRONG_PEAK_RATIO;
-        boolean agrees = previous != null && Math.abs(previous.lagMs - estimate.lagMs) <= ACOUSTIC_AGREEMENT_MS;
-        if (!strong && !agrees) {
-            // A passing noise estimate must not keep restarting the confirmation of a real one: only a
-            // better estimate, or a pending one that went stale, takes its place
-            if (previous == null || estimate.score > previous.score || now - pendingEstimateAtMs > ACOUSTIC_PENDING_MAX_MS) {
-                pendingEstimate = estimate;
-                pendingEstimateAtMs = now;
-            }
-            return;
-        }
-        // Agrees, but measured on (largely) the same audio: wait for an independent confirmation
-        if (!strong && now - pendingEstimateAtMs < ACOUSTIC_INDEPENDENT_MS) return;
-        pendingEstimate = null;
-        long lagMs = agrees ? (previous.lagMs + estimate.lagMs) / 2 : estimate.lagMs;
-        // Radio heard lagMs after the F1 audio: take that much off its delay
-        setAdjust(adjustMs - lagMs);
-        lastAcousticCheckAtMs = SystemClock.elapsedRealtime();
-        Log.i(TAG, "acoustic correction lagMs=" + lagMs + " adjustMs=" + adjustMs);
-        if (Math.abs(lagMs) >= 500L) ui.notify(RadioUi.Notice.ACOUSTIC_ADJUSTED, -lagMs);
+        if (!resyncing && now - lastAcousticApplyAtMs < MIN_APPLY_INTERVAL_MS) return;
+        resyncUntilMs = 0L;
+        resyncNoticePending = false;
+        // Radio heard lag ms after the F1 audio: take that much off its delay
+        setAdjust(adjustMs - lag);
+        lastAcousticApplyAtMs = now;
+        lastAcousticCheckAtMs = now;
+        Log.i(TAG, "acoustic correction lagMs=" + lag + " adjustMs=" + adjustMs + " (combined of " + accumulator.count + ")");
+        if (Math.abs(lag) >= 500L) ui.notify(RadioUi.Notice.ACOUSTIC_ADJUSTED, -lag);
     }
 }
