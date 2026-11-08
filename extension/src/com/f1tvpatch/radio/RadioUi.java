@@ -646,7 +646,11 @@ final class RadioUi {
                 if (!radio.isAutoSync()) return t("De radio volgt het beeld niet automatisch.", "The radio does not follow the picture automatically.");
                 if (radio.isAcoustic() && !radio.isAcousticSuspended()) {
                     long check = radio.getLastAcousticCheckAtMs();
-                    if (check <= 0) return t("Volgt het beeld; meet nu het circuitgeluid.", "Following the picture; measuring the circuit sound.");
+                    String progress = radio.getAcousticProgressText();
+                    if (check <= 0) {
+                        return t("Volgt het beeld; meet nu het circuitgeluid", "Following the picture; measuring the circuit sound")
+                                + (progress.isEmpty() ? "." : " (" + progress + ").");
+                    }
                     long minutes = (SystemClock.elapsedRealtime() - check) / 60_000L;
                     return String.format(Locale.getDefault(), t("Afgestemd op het circuitgeluid, %d min geleden gecontroleerd.",
                             "Matched to the circuit sound, checked %d min ago."), minutes);

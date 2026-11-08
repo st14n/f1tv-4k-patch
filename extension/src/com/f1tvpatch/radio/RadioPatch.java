@@ -43,6 +43,7 @@ public final class RadioPatch {
     private static final String KEY_ACOUSTIC = "acoustic_sync";
     private static final String KEY_AUTO_SYNC = "auto_sync";
     private static final String KEY_MANUAL_DELAY_MS = "manual_delay_ms";
+    private static final String KEY_BASE_LAG_MS = "base_lag_ms";
 
     static final long STEP_MS = 250L;
     private static final long TICK_MS = 100L;
@@ -299,6 +300,7 @@ public final class RadioPatch {
                 ui.notify(RadioUi.Notice.IN_SYNC, null);
             }
             if (videoPlaying) maybeRunAcousticEstimate();
+            if (videoPlaying) logActiveAudioTrackOnce(player);
         } else if (videoPlaying && audibleSince == 0) {
             // Radio can't cover this moment (buffering, outside buffer, stream down): F1 audio back.
             setF1Muted(false);
@@ -319,20 +321,23 @@ public final class RadioPatch {
         TiledmediaView view = player.mainView();
         if (view == null) return -1L;
 
+        TimingReport timeshift = view.getCurrentTimingReport(TimingType.TIMESHIFT);
+        long shiftMs = timeshift != null && timeshift.getIsSuccess() ? Math.abs(timeshift.getTimeShiftInMilliseconds()) : -1L;
         TimingReport wallclock = view.getCurrentTimingReport(TimingType.WALLCLOCK_TIME);
         if (wallclock != null && wallclock.getIsSuccess() && wallclock.isWallclockTimeSourceBased()) {
             long frameEpochMs = wallclock.getCurrentPositionInMilliseconds();
             if (frameEpochMs > 1_000_000_000_000L) {
                 lagSource = "wallclock";
-                return System.currentTimeMillis() - frameEpochMs;
+                long lagMs = System.currentTimeMillis() - frameEpochMs;
+                if (shiftMs >= 0) learnBaseLag(lagMs - shiftMs);
+                return lagMs;
             }
         }
         lagSource = "fallback";
 
-        // No usable wall clock: fixed base delay plus however far the viewer is behind live.
-        TimingReport timeshift = view.getCurrentTimingReport(TimingType.TIMESHIFT);
-        long shiftMs = timeshift != null && timeshift.getIsSuccess() ? Math.abs(timeshift.getTimeShiftInMilliseconds()) : 0L;
-        return Config.FALLBACK_DELAY_MS + shiftMs;
+        // No usable wall clock: how far the viewer is behind the live edge, plus the base lag of that
+        // edge, remembered from the last stream that did have a clock (the fixed 20 s before any).
+        return baseLagMs() + Math.max(0L, shiftMs);
     }
 
     /**
@@ -496,6 +501,44 @@ public final class RadioPatch {
             }
             Log.i(TAG, "radio stream changed");
         });
+    }
+
+    private long lastBaseLagSavedAtMs;
+
+    private long baseLagMs() {
+        return prefs.getLong(KEY_BASE_LAG_MS, Config.FALLBACK_DELAY_MS);
+    }
+
+    /** A slow average of "wall-clock lag minus distance behind the live edge" for the no-clock fallback. */
+    private void learnBaseLag(long valueMs) {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastBaseLagSavedAtMs < 60_000L || valueMs < 0L || valueMs > 90_000L) return;
+        lastBaseLagSavedAtMs = now;
+        prefs.edit().putLong(KEY_BASE_LAG_MS, (baseLagMs() * 3 + valueMs) / 4).apply();
+    }
+
+    /** How the acoustic measurement is doing, for the panel: collected curves and the combined result. */
+    String getAcousticProgressText() {
+        AcousticCorrelator.Estimate total = accumulator.result();
+        if (total == null) return "";
+        return String.format(Locale.ROOT, "%d/%d", Math.min(accumulator.count, INTEGRATED_MIN_COUNT), INTEGRATED_MIN_COUNT);
+    }
+
+    private boolean loggedAudioTrack;
+
+    /** Once per session: which audio track ClearVR plays (is an ambient-only track on offer?). */
+    private void logActiveAudioTrackOnce(HostPlayer player) {
+        if (loggedAudioTrack) return;
+        loggedAudioTrack = true;
+        try {
+            Object clearVr = player.clearVrPlayer();
+            if (clearVr == null) return;
+            Object stream = clearVr.getClass().getMethod("getActiveAudioStream").invoke(clearVr);
+            Object track = stream == null ? null : stream.getClass().getMethod("getAudioTrack").invoke(stream);
+            Log.i(TAG, "active audio: stream=" + stream + " track=" + track);
+        } catch (Throwable t) {
+            Log.i(TAG, "active audio track not readable: " + t);
+        }
     }
 
     /** Every 10 s while live: what the sync is based on, for tuning from the logs. */
