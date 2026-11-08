@@ -41,6 +41,7 @@ public final class RadioPatch {
     private static final String KEY_ENABLED = "enabled";
     private static final String KEY_ADJUST_MS = "adjust_ms";
     private static final String KEY_ACOUSTIC = "acoustic_sync";
+    private static final String KEY_FX_SYNC = "fx_sync";
     private static final String KEY_AUTO_SYNC = "auto_sync";
     private static final String KEY_MANUAL_DELAY_MS = "manual_delay_ms";
     private static final String KEY_BASE_LAG_MS = "base_lag_ms";
@@ -118,6 +119,9 @@ public final class RadioPatch {
     private boolean radioCarrying;
     private boolean announcedSync;
     private boolean acoustic;
+    /** Listen to F1's FX (circuit sound only) track instead of the commentary mix while measuring. */
+    private boolean fxSync;
+    private final FxAudio fxAudio = new FxAudio();
     /** The user nudged the sync by hand this session; acoustic sync then leaves the adjustment alone. */
     private boolean acousticSuspended;
     private long lastAlignmentChangeAtMs;
@@ -145,6 +149,7 @@ public final class RadioPatch {
         adjustMs = prefs.getLong(KEY_ADJUST_MS, Config.DEFAULT_ADJUST_MS);
         manualDelayMs = prefs.getLong(KEY_MANUAL_DELAY_MS, Config.FALLBACK_DELAY_MS);
         acoustic = prefs.getBoolean(KEY_ACOUSTIC, true);
+        fxSync = prefs.getBoolean(KEY_FX_SYNC, true);
         ui = new RadioUi(activity, this);
     }
 
@@ -299,8 +304,8 @@ public final class RadioPatch {
                 announcedSync = true;
                 ui.notify(RadioUi.Notice.IN_SYNC, null);
             }
+            manageFxTrack(player);
             if (videoPlaying) maybeRunAcousticEstimate();
-            if (videoPlaying) logActiveAudioTrackOnce(player);
         } else if (videoPlaying && audibleSince == 0) {
             // Radio can't cover this moment (buffering, outside buffer, stream down): F1 audio back.
             setF1Muted(false);
@@ -380,11 +385,32 @@ public final class RadioPatch {
         try {
             TiledmediaPlayer clearVr = player.clearVrPlayer();
             if (clearVr == null) return;
+            if (!mute) fxAudio.restore(clearVr);
             // muteAudio is ignored until ClearVR is preparing playout, so re-assert every tick.
             if (clearVr.getIsAudioMuted() != mute) clearVr.muteAudio(mute);
             f1MutedByUs = mute;
         } catch (Throwable t) {
             Log.w(TAG, "could not " + (mute ? "mute" : "unmute") + " F1 audio", t);
+        }
+    }
+
+    /**
+     * While the radio carries the commentary (F1's own audio is muted), F1 plays its FX track, the
+     * circuit sound without commentary, so the acoustic sync has clean sound to compare the radio with.
+     * Back to the viewer's own track when the measuring stops (or F1's audio is needed again).
+     */
+    private void manageFxTrack(HostPlayer player) {
+        try {
+            TiledmediaPlayer clearVr = player.clearVrPlayer();
+            if (clearVr == null) return;
+            if (fxSync && acoustic && autoSync && !acousticSuspended) {
+                // The audio the tap hears changes: what was measured before does not apply
+                if (fxAudio.ensureFx(clearVr)) markAlignmentChanged();
+            } else {
+                fxAudio.restore(clearVr);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "FX audio track handling failed", t);
         }
     }
 
@@ -522,23 +548,6 @@ public final class RadioPatch {
         AcousticCorrelator.Estimate total = accumulator.result();
         if (total == null) return "";
         return String.format(Locale.ROOT, "%d/%d", Math.min(accumulator.count, INTEGRATED_MIN_COUNT), INTEGRATED_MIN_COUNT);
-    }
-
-    private boolean loggedAudioTrack;
-
-    /** Once per session: which audio track ClearVR plays (is an ambient-only track on offer?). */
-    private void logActiveAudioTrackOnce(HostPlayer player) {
-        if (loggedAudioTrack) return;
-        loggedAudioTrack = true;
-        try {
-            Object clearVr = player.clearVrPlayer();
-            if (clearVr == null) return;
-            Object stream = clearVr.getClass().getMethod("getActiveAudioStream").invoke(clearVr);
-            Object track = stream == null ? null : stream.getClass().getMethod("getAudioTrack").invoke(stream);
-            Log.i(TAG, "active audio: stream=" + stream + " track=" + track);
-        } catch (Throwable t) {
-            Log.i(TAG, "active audio track not readable: " + t);
-        }
     }
 
     /** Every 10 s while live: what the sync is based on, for tuning from the logs. */

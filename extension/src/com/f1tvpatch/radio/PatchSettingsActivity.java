@@ -157,6 +157,9 @@ public final class PatchSettingsActivity extends Activity {
             toggle(t("Afstemmen op circuitgeluid", "Match to circuit sound"), "acoustic_sync", true,
                     t("Stelt de sync bij met het circuitgeluid onder de radio, na enkele minuten meten. Met \"Klopt\" zet je het vast.",
                             "Fine-tunes the sync using the circuit sound under the radio, after measuring for a few minutes. \"Locked in\" keeps it."));
+            toggle(t("Circuitgeluid-spoor (FX) voor de meting", "Circuit sound track (FX) for measuring"), "fx_sync", true,
+                    t("Zet F1 tijdens het meten op het FX-spoor (circuitgeluid zonder commentaar); jouw eigen spoor komt terug zodra de radio stopt.",
+                            "While measuring, F1 plays its FX track (circuit sound without commentary); your own track returns when the radio stops."));
             Row correction = row(t("Correctie terugzetten", "Reset correction"));
             correction.summarySource = () -> {
                 long adjust = Updater.prefs(this).getLong("adjust_ms", Config.DEFAULT_ADJUST_MS);
