@@ -154,8 +154,9 @@ public final class PatchSettingsActivity extends Activity {
                     t("Vervangt het F1-commentaar bij live sessies.", "Replaces the F1 commentary in live sessions."));
             toggle(t("Automatisch synchroniseren", "Automatic sync"), "auto_sync", true,
                     t("Volgt hoe ver het beeld achter live loopt.", "Follows how far the picture is behind live."));
-            toggle(t("Afstemmen op circuitgeluid", "Match to circuit sound"), "acoustic_sync", true,
-                    t("Stelt de sync bij met het circuitgeluid onder de radio.", "Fine-tunes the sync using the circuit sound under the radio."));
+            toggle(t("Afstemmen op circuitgeluid (experimenteel)", "Match to circuit sound (experimental)"), "acoustic_sync", false,
+                    t("Stelt de sync bij met het circuitgeluid onder de radio. Standaard uit: de beeldklok is nauwkeuriger.",
+                            "Fine-tunes the sync using the circuit sound under the radio. Off by default: the video clock is more accurate."));
             Row correction = row(t("Correctie terugzetten", "Reset correction"));
             correction.summarySource = () -> {
                 long adjust = Updater.prefs(this).getLong("adjust_ms", Config.DEFAULT_ADJUST_MS);

@@ -143,7 +143,7 @@ public final class RadioPatch {
         autoSync = prefs.getBoolean(KEY_AUTO_SYNC, true);
         adjustMs = prefs.getLong(KEY_ADJUST_MS, Config.DEFAULT_ADJUST_MS);
         manualDelayMs = prefs.getLong(KEY_MANUAL_DELAY_MS, Config.FALLBACK_DELAY_MS);
-        acoustic = prefs.getBoolean(KEY_ACOUSTIC, true);
+        acoustic = prefs.getBoolean(KEY_ACOUSTIC, false);
         ui = new RadioUi(activity, this);
     }
 
@@ -443,6 +443,20 @@ public final class RadioPatch {
         markAlignmentChanged();
         Log.i(TAG, "resync requested");
         ui.notify(RadioUi.Notice.RESYNC_STARTED, null);
+    }
+
+    /**
+     * "That's right": keep the sound as it is now. The correction is stored (it already is, on every
+     * change), and acoustic matching stays out of it for this session, so nothing moves it afterwards.
+     */
+    void lockSync() {
+        acousticSuspended = true;
+        pendingEstimate = null;
+        resyncUntilMs = 0L;
+        resyncNoticePending = false;
+        prefs.edit().putLong(KEY_ADJUST_MS, adjustMs).apply();
+        Log.i(TAG, "sync locked adjustMs=" + adjustMs);
+        ui.notify(RadioUi.Notice.LOCKED, adjustMs);
     }
 
     boolean isResyncing() { return SystemClock.elapsedRealtime() < resyncUntilMs; }

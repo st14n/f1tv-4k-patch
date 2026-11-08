@@ -39,7 +39,7 @@ import java.util.Locale;
  * The bar shows with F1's own controls (OK), reached with D-pad up; long-press OK / MENU also open it. Built in code: the patch ships no resources.
  */
 final class RadioUi {
-    enum Notice { IN_SYNC, ACOUSTIC_ADJUSTED, BUFFER_EXCEEDED, RESYNC_STARTED, RESYNC_OK, RESYNC_FAILED }
+    enum Notice { IN_SYNC, ACOUSTIC_ADJUSTED, BUFFER_EXCEEDED, RESYNC_STARTED, RESYNC_OK, RESYNC_FAILED, LOCKED }
 
     private static final int BG = 0xF20D0E12;
     private static final int CARD = 0xFF1C1F26;
@@ -220,6 +220,11 @@ final class RadioUi {
                 addNotice(Icon.WAVE, t("Opnieuw syncen…", "Syncing again…"),
                         t("Even het circuitgeluid meten, dat duurt een halve minuut.", "Measuring the circuit sound, about half a minute."));
                 break;
+            case LOCKED:
+                addNotice(Icon.CHECK, t("Vastgezet", "Locked"),
+                        String.format(Locale.getDefault(), t("Correctie %+.2f s blijft staan.", "Correction %+.2f s stays."),
+                                (valueMs == null ? 0 : valueMs) / 1000.0));
+                break;
             case RESYNC_OK:
                 addNotice(Icon.CHECK, t("Gecontroleerd: radio loopt gelijk", "Checked: the radio is in sync"),
                         String.format(Locale.getDefault(), t("Verschil %.2f s.", "Difference %.2f s."), Math.abs(valueMs == null ? 0 : valueMs) / 1000.0));
@@ -341,6 +346,13 @@ final class RadioUi {
             refreshBar(radio.getSyncState());
         });
         b.addView(barRadio, buttonParams(c, ViewGroup.LayoutParams.WRAP_CONTENT, 42));
+
+        TextView barLock = button(c, "✓ " + t("Klopt", "Locked in"), true);
+        barLock.setOnClickListener(v -> {
+            radio.lockSync();
+            barVisibleUntilMs = SystemClock.elapsedRealtime() + BAR_FORCED_MS;
+        });
+        b.addView(barLock, buttonParams(c, ViewGroup.LayoutParams.WRAP_CONTENT, 42));
 
         barResync = button(c, "", true);
         barResync.setOnClickListener(v -> {
