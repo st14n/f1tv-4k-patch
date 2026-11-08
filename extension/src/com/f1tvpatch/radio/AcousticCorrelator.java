@@ -23,6 +23,8 @@ final class AcousticCorrelator {
     }
 
     static final long WINDOW_MS = 30_000L;
+    /** Why the last call gave no estimate (for the log): settling after a change, or too little audio. */
+    static volatile String lastSkip = "";
     static final long MAX_LAG_MS = 10_000L;
     // Leave the newest audio out: part of it hasn't been heard yet
     private static final long END_MARGIN_MS = 2_000L;
@@ -38,11 +40,20 @@ final class AcousticCorrelator {
         double nowMs = SystemClock.elapsedRealtime();
         double f1Start = nowMs - END_MARGIN_MS - MAX_LAG_MS - WINDOW_MS;
         double radioStart = f1Start - MAX_LAG_MS;
-        if (radioStart < notBeforeMs) return null;
+        if (radioStart < notBeforeMs) {
+            lastSkip = String.format(java.util.Locale.ROOT, "settling: %d s until the first usable window", Math.round((notBeforeMs - radioStart) / 1000.0));
+            return null;
+        }
 
         float[][] f1Grid = f1.gridded(f1Start, n);
         float[][] radioGrid = radio.gridded(radioStart, n + 2 * maxLag);
-        if (coverage(f1Grid) < MIN_COVERAGE || coverage(radioGrid) < MIN_COVERAGE) return null;
+        double f1Coverage = coverage(f1Grid);
+        double radioCoverage = coverage(radioGrid);
+        if (f1Coverage < MIN_COVERAGE || radioCoverage < MIN_COVERAGE) {
+            lastSkip = String.format(java.util.Locale.ROOT, "too little audio: F1 %.0f%%, radio %.0f%% (need %.0f%%)",
+                    f1Coverage * 100, radioCoverage * 100, MIN_COVERAGE * 100);
+            return null;
+        }
 
         int bands = AcousticFeatures.BAND_COUNT;
         double[] correlation = new double[2 * maxLag + 1];

@@ -67,6 +67,7 @@ public final class RadioPatch {
     private static final long ACOUSTIC_EDGE_MARGIN_MS = 1_500L;
     // Two estimates must agree this closely before the adjustment is changed...
     private static final long ACOUSTIC_AGREEMENT_MS = 250L;
+    private static final long ACOUSTIC_PENDING_MAX_MS = 90_000L;
     // ...and come from different audio: estimates run every 5 s over a 30 s window, so neighbours
     // share most of their input and agree by construction. Require a full window between them.
     private static final long ACOUSTIC_INDEPENDENT_MS = AcousticCorrelator.WINDOW_MS;
@@ -490,7 +491,8 @@ public final class RadioPatch {
         nextStatusLogAtMs = now + 10_000L;
         Log.i(TAG, "sync status videoLagMs=" + videoLagMs + " (" + lagSource + ") adjustMs=" + adjustMs
                 + " targetMs=" + targetDelayMs + " autoSync=" + autoSync + " playing=" + videoPlaying
-                + " radioCarrying=" + radioCarrying + " f1Muted=" + f1MutedByUs + " state=" + getSyncState());
+                + " radioCarrying=" + radioCarrying + " f1Muted=" + f1MutedByUs + " state=" + getSyncState()
+                + " acoustic=" + acoustic + " suspended=" + acousticSuspended + " tapWrites=" + AudioTap.writes);
     }
 
     /** From adb (LoginReceiver, DUMP-protected): set the sync adjustment of the running session. */
@@ -553,10 +555,25 @@ public final class RadioPatch {
         pendingEstimate = null;
     }
 
+    private long nextAcousticLogAtMs;
+
+    /** Why no acoustic estimate is being made, at most every 20 s. */
+    private void logAcousticIdle(String reason) {
+        long now = SystemClock.elapsedRealtime();
+        if (now < nextAcousticLogAtMs) return;
+        nextAcousticLogAtMs = now + 20_000L;
+        Log.i(TAG, reason);
+    }
+
     private void maybeRunAcousticEstimate() {
         long now = SystemClock.elapsedRealtime();
         boolean resyncing = now < resyncUntilMs;
-        if (!autoSync || !(acoustic || resyncing) || acousticSuspended || acousticInFlight || now < nextAcousticAtMs) return;
+        if (!autoSync || !(acoustic || resyncing) || acousticSuspended || acousticInFlight || now < nextAcousticAtMs) {
+            if (acousticSuspended || !acoustic) {
+                logAcousticIdle("acoustic idle: " + (acousticSuspended ? "paused after a manual change (use 'Sync again')" : "switched off"));
+            }
+            return;
+        }
         nextAcousticAtMs = now + ACOUSTIC_INTERVAL_MS;
         final double notBeforeMs = lastAlignmentChangeAtMs;
         acousticInFlight = true;
@@ -570,6 +587,7 @@ public final class RadioPatch {
             final AcousticCorrelator.Estimate result = estimate;
             MAIN.post(() -> {
                 acousticInFlight = false;
+                if (result == null) logAcousticIdle("acoustic idle: " + AcousticCorrelator.lastSkip);
                 if (result != null && current == this) onAcousticEstimate(result, notBeforeMs);
             });
         });
@@ -610,8 +628,12 @@ public final class RadioPatch {
         boolean strong = estimate.score >= ACOUSTIC_STRONG_SCORE && estimate.peakRatio >= ACOUSTIC_STRONG_PEAK_RATIO;
         boolean agrees = previous != null && Math.abs(previous.lagMs - estimate.lagMs) <= ACOUSTIC_AGREEMENT_MS;
         if (!strong && !agrees) {
-            pendingEstimate = estimate;
-            pendingEstimateAtMs = now;
+            // A passing noise estimate must not keep restarting the confirmation of a real one: only a
+            // better estimate, or a pending one that went stale, takes its place
+            if (previous == null || estimate.score > previous.score || now - pendingEstimateAtMs > ACOUSTIC_PENDING_MAX_MS) {
+                pendingEstimate = estimate;
+                pendingEstimateAtMs = now;
+            }
             return;
         }
         // Agrees, but measured on (largely) the same audio: wait for an independent confirmation

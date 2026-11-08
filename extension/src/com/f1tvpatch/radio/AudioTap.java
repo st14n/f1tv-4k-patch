@@ -19,6 +19,8 @@ public final class AudioTap {
     private AudioTap() { }
 
     static final AcousticFeatures F1_AUDIO = new AcousticFeatures();
+    /** Writes seen while the tap was wanted (for the sync status log: 0 = the hook gets no audio). */
+    static volatile long writes;
 
     private static AudioTrack lastTrack;
     private static long framesWritten;
@@ -79,6 +81,7 @@ public final class AudioTap {
 
     private static boolean wanted(AudioTrack track) {
         if (!RadioPatch.isAcousticTapWanted()) return false;
+        writes++;
         if (track != lastTrack) {
             lastTrack = track;
             framesWritten = 0L;
