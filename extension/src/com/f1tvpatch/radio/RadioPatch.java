@@ -256,6 +256,32 @@ public final class RadioPatch {
         if (current == this) MAIN.postDelayed(tick, TICK_MS);
     }
 
+    private boolean startMuteChecked;
+
+    /**
+     * Once per player: F1's audio must not start muted. If ClearVR reports muted although this patch
+     * did not mute it (a mute left over from an earlier session; the mute state lives in ClearVR's
+     * core), say so in the log and unmute, so a replay is not silent. The viewer's own mute button
+     * still works afterwards.
+     */
+    private void checkStartMute(HostPlayer player) {
+        if (startMuteChecked || f1MutedByUs) return;
+        try {
+            TiledmediaPlayer clearVr = player.clearVrPlayer();
+            if (clearVr == null) return;
+            startMuteChecked = true;
+            boolean muted = clearVr.getIsAudioMuted();
+            L.i("ClearVR audio at start: muted=" + muted + " (patch has not muted it)");
+            if (muted) {
+                clearVr.muteAudio(false);
+                L.i("ClearVR audio was muted at start: unmuted; now muted=" + clearVr.getIsAudioMuted());
+            }
+        } catch (Throwable t) {
+            startMuteChecked = true;
+            L.w("start mute check failed", t);
+        }
+    }
+
     private void step(HostPlayer player) throws Exception {
         if (disabledByError) return;
         // isLiveContent() only reads a field; isPlaying() goes through F1TV's lazy ClearVR player
@@ -263,6 +289,7 @@ public final class RadioPatch {
         Boolean hostLive = player.isLive();
         // No live check in this F1TV version: live = the frame on screen is a recent wall-clock time
         live = hostLive != null ? hostLive : isRecentWallclock(player);
+        checkStartMute(player);
         if (!enabled || !live) {
             if (engine != null) engine.setPlaying(false);
             setF1Muted(false);
