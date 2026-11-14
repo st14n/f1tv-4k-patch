@@ -56,7 +56,7 @@ final class FxAudio {
                 StringBuilder sb = new StringBuilder("audio tracks on offer:");
                 for (Object t : tracks) sb.append(" [").append(name(t)).append('/').append(language(t)).append(']');
                 sb.append(" active=[").append(name(active)).append('/').append(language(active)).append(']');
-                Log.i(TAG, sb.toString());
+                L.i(sb.toString());
             }
             if (isFx(active)) return false;
             Object fx = findFx(tracks);
@@ -65,7 +65,7 @@ final class FxAudio {
                 nextAttemptAtMs = now + 60_000L;
                 if (!noFxLogged) {
                     noFxLogged = true;
-                    Log.i(TAG, "no FX audio track on offer");
+                    L.i("no FX audio track on offer");
                 }
                 return false;
             }
@@ -73,7 +73,7 @@ final class FxAudio {
             apply(clearVr, fx);
             switched = true;
             nextAttemptAtMs = now + RETRY_MS;
-            Log.i(TAG, "FX audio track selected for the sync (was [" + name(active) + "/" + language(active) + "])");
+            L.i("FX audio track selected for the sync (was [" + name(active) + "/" + language(active) + "])");
             return true;
         } catch (Throwable t) {
             failed("FX audio track not selectable", t);
@@ -93,7 +93,7 @@ final class FxAudio {
             if (active != null && !isFx(active)) return; // someone else already switched it back
             apply(clearVr, back);
             nextAttemptAtMs = SystemClock.elapsedRealtime() + RETRY_MS;
-            Log.i(TAG, "audio track restored to [" + name(back) + "/" + language(back) + "]");
+            L.i("audio track restored to [" + name(back) + "/" + language(back) + "]");
         } catch (Throwable t) {
             failed("could not restore the audio track", t);
         }
@@ -103,7 +103,7 @@ final class FxAudio {
         failures++;
         nextAttemptAtMs = SystemClock.elapsedRealtime() + RETRY_MS;
         if (failures >= MAX_FAILURES || t instanceof LinkageError) unavailable = true;
-        Log.w(TAG, what + " (" + failures + ")", t);
+        L.w(what + " (" + failures + ")", t);
     }
 
     // ── ClearVR through reflection ───────────────────────────────────────────
@@ -165,8 +165,8 @@ final class FxAudio {
         Object handler = Proxy.newProxyInstance(handlerType.getClassLoader(), new Class<?>[]{handlerType}, new InvocationHandler() {
             @Override public Object invoke(Object proxy, Method method, Object[] args) {
                 String m = method.getName();
-                if (m.equals("onFailure")) Log.w(TAG, "audio track change failed: " + (args == null || args.length == 0 ? "" : args[0]));
-                else if (m.equals("onSuccess")) Log.i(TAG, "audio track change applied");
+                if (m.equals("onFailure")) L.w("audio track change failed: " + (args == null || args.length == 0 ? "" : args[0]));
+                else if (m.equals("onSuccess")) L.i("audio track change applied");
                 return null;
             }
         });

@@ -71,7 +71,7 @@ final class RadioEngine {
         playoutThread = new Thread(this::playoutLoop, "f1radio-playout");
         playoutThread.setDaemon(true);
         playoutThread.start();
-        Log.i(TAG, "engine started url=" + url);
+        L.i("engine started url=" + url);
     }
 
     synchronized void release() {
@@ -82,7 +82,7 @@ final class RadioEngine {
         networkThread = null;
         playoutThread = null;
         ring = null;
-        Log.i(TAG, "engine released");
+        L.i("engine released");
     }
 
     /** Delay between a radio frame's live arrival and when it is heard. Negative = no target yet. */
@@ -129,7 +129,7 @@ final class RadioEngine {
             } catch (Throwable t) {
                 if (!running) return;
                 lastError = t.getClass().getSimpleName() + ": " + t.getMessage();
-                Log.w(TAG, "stream failed, retrying in " + backoffMs + "ms", t);
+                L.w("stream failed, retrying in " + backoffMs + "ms", t);
             }
             PcmRing current = ring;
             if (current != null) current.markDiscontinuity();
@@ -158,7 +158,7 @@ final class RadioEngine {
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             long ptsUs = 0L;
             lastError = null;
-            Log.i(TAG, "connected contentType=" + contentType + " icy-metaint=" + metaInt);
+            L.i("connected contentType=" + contentType + " icy-metaint=" + metaInt);
 
             while (running) {
                 if (Thread.interrupted()) throw new InterruptedException();
@@ -166,7 +166,7 @@ final class RadioEngine {
                 if (decoder == null) {
                     decoder = createDecoder(frame);
                     formatDescription = frame.describe();
-                    Log.i(TAG, "decoder configured for " + formatDescription);
+                    L.i("decoder configured for " + formatDescription);
                 }
                 queueInput(decoder, frame, ptsUs, info);
                 ptsUs += frame.samplesPerFrame * 1_000_000L / frame.sampleRate;
@@ -263,7 +263,7 @@ final class RadioEngine {
         if (current != null && current.sampleRate == sampleRate && current.channels == channels) return current;
         if (channels < 1 || channels > 2) throw new IllegalStateException("unsupported channel count " + channels);
         ring = new PcmRing(sampleRate, channels, MAX_BUFFER_SECONDS);
-        Log.i(TAG, "pcm ring " + sampleRate + "Hz x" + channels + " (" + MAX_BUFFER_SECONDS + "s)");
+        L.i("pcm ring " + sampleRate + "Hz x" + channels + " (" + MAX_BUFFER_SECONDS + "s)");
         return ring;
     }
 
@@ -364,7 +364,7 @@ final class RadioEngine {
         } catch (Throwable t) {
             lastError = t.getClass().getSimpleName() + ": " + t.getMessage();
             state = State.ERROR;
-            Log.e(TAG, "playout failed", t);
+            L.e("playout failed", t);
         } finally {
             audibleSinceMs = 0L;
             if (track != null) {

@@ -152,9 +152,7 @@ public final class PatchSettingsActivity extends Activity {
         if (hasRadio) {
             toggle(t("Custom radio gebruiken", "Use custom radio"), "enabled", Config.DEFAULT_ENABLED,
                     t("Vervangt het F1-commentaar bij live sessies.", "Replaces the F1 commentary in live sessions."));
-            toggle(t("Automatisch synchroniseren", "Automatic sync"), "auto_sync", true,
-                    t("Volgt hoe ver het beeld achter live loopt.", "Follows how far the picture is behind live."));
-            toggle(t("Afstemmen op circuitgeluid", "Match to circuit sound"), "acoustic_sync", true,
+            toggle(t("Afstemmen op circuitgeluid", "Match to circuit sound"), "acoustic_sync2", true,
                     t("Stelt de sync bij met het circuitgeluid onder de radio, na enkele minuten meten. Met \"Klopt\" zet je het vast.",
                             "Fine-tunes the sync using the circuit sound under the radio, after measuring for a few minutes. \"Locked in\" keeps it."));
             toggle(t("Circuitgeluid-spoor (FX) voor de meting", "Circuit sound track (FX) for measuring"), "fx_sync", true,

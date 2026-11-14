@@ -40,7 +40,7 @@ public final class RadioPatch {
     private static final String PREFS = "f1tv_radio_patch";
     private static final String KEY_ENABLED = "enabled";
     private static final String KEY_ADJUST_MS = "adjust_ms";
-    private static final String KEY_ACOUSTIC = "acoustic_sync";
+    private static final String KEY_ACOUSTIC = "acoustic_sync2";
     private static final String KEY_FX_SYNC = "fx_sync";
     private static final String KEY_AUTO_SYNC = "auto_sync";
     private static final String KEY_MANUAL_DELAY_MS = "manual_delay_ms";
@@ -113,6 +113,7 @@ public final class RadioPatch {
     private long videoLagMs = -1L;
     private long targetDelayMs = -1L;
     private boolean f1MutedByUs;
+    private boolean mutedViaTap;
     private boolean disabledByError;
     private int consecutiveFailures;
     private boolean live;
@@ -156,8 +157,10 @@ public final class RadioPatch {
     /** Whether the F1 and radio audio should be fingerprinted right now (see {@link AudioTap}). */
     static boolean isAcousticTapWanted() {
         RadioPatch controller = current;
+        // Also during a "sync again" with the setting off: that measurement needs the audio just the same
         return controller != null && controller.enabled && controller.live && controller.autoSync
-                && controller.acoustic && !controller.disabledByError;
+                && (controller.acoustic || SystemClock.elapsedRealtime() < controller.resyncUntilMs)
+                && !controller.disabledByError;
     }
 
     // ── Smali hook entry points ──────────────────────────────────────────────
@@ -166,15 +169,16 @@ public final class RadioPatch {
     public static void onPlayerCreated(Object hostPlayer, Activity activity) {
         try {
             if (!StreamUrl.has() || hostPlayer == null || activity == null) return;
+            L.init(activity.getApplicationContext());
             registerLifecycle(activity);
             if (current != null) current.detach();
             MAIN.removeCallbacks(RELEASE_ENGINE);
             current = new RadioPatch(new HostPlayer(hostPlayer), activity);
             MAIN.post(current.tick);
-            Log.i(TAG, "attached to " + hostPlayer.getClass().getName() + " enabled=" + current.enabled + " autoSync=" + current.autoSync
+            L.i("attached to " + hostPlayer.getClass().getName() + " enabled=" + current.enabled + " autoSync=" + current.autoSync
                     + " adjustMs=" + current.adjustMs + " acoustic=" + current.acoustic);
         } catch (Throwable t) {
-            Log.e(TAG, "onPlayerCreated failed; radio disabled", t);
+            L.e("onPlayerCreated failed; radio disabled", t);
         }
     }
 
@@ -185,7 +189,7 @@ public final class RadioPatch {
             if (controller == null || controller.activityRef.get() != activity) return false;
             return controller.ui.handleKey(event);
         } catch (Throwable t) {
-            Log.e(TAG, "onKeyEvent failed", t);
+            L.e("onKeyEvent failed", t);
             return false;
         }
     }
@@ -209,13 +213,14 @@ public final class RadioPatch {
     private void detach() {
         MAIN.removeCallbacks(tick);
         setF1Muted(false);
+        AudioTap.silence = false;
         if (engine != null) engine.setPlaying(false);
         ui.dispose();
         if (current == this) current = null;
         // Keep the stream (and its delay buffer) alive briefly so switching sessions is instant.
         MAIN.removeCallbacks(RELEASE_ENGINE);
         MAIN.postDelayed(RELEASE_ENGINE, ENGINE_IDLE_RELEASE_MS);
-        Log.i(TAG, "detached");
+        L.i("detached");
     }
 
     // ── Sync loop ────────────────────────────────────────────────────────────
@@ -235,9 +240,9 @@ public final class RadioPatch {
             // LinkageError = F1TV/ClearVR API changed: give up at once. Anything else may be a
             // transient state during start-up/teardown, so only give up if it keeps happening.
             consecutiveFailures++;
-            Log.w(TAG, "sync loop failed (" + consecutiveFailures + ")", t);
+            L.w("sync loop failed (" + consecutiveFailures + ")", t);
             if (t instanceof LinkageError || consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-                Log.e(TAG, "radio disabled for this session");
+                L.e("radio disabled for this session");
                 disabledByError = true;
                 setF1Muted(false);
                 if (engine != null) engine.setPlaying(false);
@@ -246,7 +251,7 @@ public final class RadioPatch {
         try {
             ui.update();
         } catch (Throwable t) {
-            Log.w(TAG, "radio UI update failed", t);
+            L.w("radio UI update failed", t);
         }
         if (current == this) MAIN.postDelayed(tick, TICK_MS);
     }
@@ -378,19 +383,38 @@ public final class RadioPatch {
         return min;
     }
 
+    /**
+     * Silences F1's own audio while the radio carries the commentary. Preferably in the audio tap
+     * (it writes silence to the track after fingerprinting the real samples), so the fingerprint does
+     * not depend on how ClearVR mutes; ClearVR's own mute only when the tap sees no audio.
+     */
     private void setF1Muted(boolean mute) {
-        if (!mute && !f1MutedByUs) return;
+        if (!mute && !f1MutedByUs) {
+            AudioTap.silence = false;
+            return;
+        }
+        boolean viaTap = mute && AudioTap.isAlive();
+        AudioTap.silence = viaTap;
         HostPlayer player = host.isGone() ? null : host;
-        if (player == null) return;
+        if (player == null) {
+            if (!mute) f1MutedByUs = false;
+            return;
+        }
         try {
             TiledmediaPlayer clearVr = player.clearVrPlayer();
             if (clearVr == null) return;
             if (!mute) fxAudio.restore(clearVr);
+            // The tap does the muting: ClearVR itself stays unmuted so it keeps decoding real samples.
             // muteAudio is ignored until ClearVR is preparing playout, so re-assert every tick.
-            if (clearVr.getIsAudioMuted() != mute) clearVr.muteAudio(mute);
+            boolean clearVrMute = mute && !viaTap;
+            if (clearVr.getIsAudioMuted() != clearVrMute) clearVr.muteAudio(clearVrMute);
+            if (f1MutedByUs != mute || mutedViaTap != viaTap) {
+                L.i("F1 audio " + (mute ? "silenced via " + (viaTap ? "the audio tap" : "ClearVR mute") : "back"));
+            }
             f1MutedByUs = mute;
+            mutedViaTap = viaTap;
         } catch (Throwable t) {
-            Log.w(TAG, "could not " + (mute ? "mute" : "unmute") + " F1 audio", t);
+            L.w("could not " + (mute ? "mute" : "unmute") + " F1 audio", t);
         }
     }
 
@@ -410,7 +434,7 @@ public final class RadioPatch {
                 fxAudio.restore(clearVr);
             }
         } catch (Throwable t) {
-            Log.w(TAG, "FX audio track handling failed", t);
+            L.w("FX audio track handling failed", t);
         }
     }
 
@@ -424,7 +448,7 @@ public final class RadioPatch {
     void nudge(long deltaMs) {
         if (autoSync && acoustic && !acousticSuspended) {
             acousticSuspended = true;
-            Log.i(TAG, "acoustic sync suspended for this session (manual nudge)");
+            L.i("acoustic sync suspended for this session (manual nudge)");
         }
         if (autoSync) {
             setAdjust(adjustMs + deltaMs);
@@ -445,7 +469,7 @@ public final class RadioPatch {
         autoSync = value;
         prefs.edit().putBoolean(KEY_AUTO_SYNC, value).apply();
         markAlignmentChanged();
-        Log.i(TAG, "auto-sync " + (value ? "on" : "off"));
+        L.i("auto-sync " + (value ? "on" : "off"));
     }
 
     void setAcoustic(boolean value) {
@@ -453,7 +477,7 @@ public final class RadioPatch {
         if (value) acousticSuspended = false;
         prefs.edit().putBoolean(KEY_ACOUSTIC, value).apply();
         markAlignmentChanged();
-        Log.i(TAG, "acoustic sync " + (value ? "on" : "off"));
+        L.i("acoustic sync " + (value ? "on" : "off"));
     }
 
     /**
@@ -472,7 +496,7 @@ public final class RadioPatch {
         resyncUntilMs = now + RESYNC_WINDOW_MS;
         resyncNoticePending = true;
         markAlignmentChanged();
-        Log.i(TAG, "resync requested");
+        L.i("resync requested");
         ui.notify(RadioUi.Notice.RESYNC_STARTED, null);
     }
 
@@ -486,7 +510,7 @@ public final class RadioPatch {
         resyncUntilMs = 0L;
         resyncNoticePending = false;
         prefs.edit().putLong(KEY_ADJUST_MS, adjustMs).apply();
-        Log.i(TAG, "sync locked adjustMs=" + adjustMs);
+        L.i("sync locked adjustMs=" + adjustMs);
         ui.notify(RadioUi.Notice.LOCKED, adjustMs);
     }
 
@@ -501,13 +525,13 @@ public final class RadioPatch {
         announcedSync = false;
         radioCarrying = false;
         setF1Muted(false);
-        Log.i(TAG, "radio reconnect requested");
+        L.i("radio reconnect requested");
     }
 
     void resumeAcoustic() {
         acousticSuspended = false;
         markAlignmentChanged();
-        Log.i(TAG, "acoustic sync resumed");
+        L.i("acoustic sync resumed");
     }
 
     void setEnabled(boolean value) {
@@ -515,7 +539,7 @@ public final class RadioPatch {
         disabledByError = false;
         announcedSync = false;
         prefs.edit().putBoolean(KEY_ENABLED, value).apply();
-        Log.i(TAG, "radio " + (value ? "enabled" : "disabled"));
+        L.i("radio " + (value ? "enabled" : "disabled"));
     }
 
     /** A different stream was chosen in the settings: drop the old one; the next tick starts the new one. */
@@ -525,7 +549,7 @@ public final class RadioPatch {
                 engine.release();
                 engine = null;
             }
-            Log.i(TAG, "radio stream changed");
+            L.i("radio stream changed");
         });
     }
 
@@ -555,10 +579,12 @@ public final class RadioPatch {
         long now = SystemClock.elapsedRealtime();
         if (now < nextStatusLogAtMs) return;
         nextStatusLogAtMs = now + 10_000L;
-        Log.i(TAG, "sync status videoLagMs=" + videoLagMs + " (" + lagSource + ") adjustMs=" + adjustMs
+        L.i("sync status videoLagMs=" + videoLagMs + " (" + lagSource + ") adjustMs=" + adjustMs
                 + " targetMs=" + targetDelayMs + " autoSync=" + autoSync + " playing=" + videoPlaying
                 + " radioCarrying=" + radioCarrying + " f1Muted=" + f1MutedByUs + " state=" + getSyncState()
-                + " acoustic=" + acoustic + " suspended=" + acousticSuspended + " tapWrites=" + AudioTap.writes);
+                + " acoustic=" + acoustic + " suspended=" + acousticSuspended + " tapWrites=" + AudioTap.writes
+                + " tapMute=" + mutedViaTap + String.format(Locale.ROOT, " f1Level=%.4f", AudioTap.level)
+                + " fx=" + fxAudio.isActive() + " curves=" + accumulator.count);
     }
 
     /** From adb (LoginReceiver, DUMP-protected): set the sync adjustment of the running session. */
@@ -567,7 +593,7 @@ public final class RadioPatch {
             RadioPatch controller = current;
             if (controller != null) {
                 controller.setAdjust(value);
-                Log.i(TAG, "adjustMs set over adb: " + controller.adjustMs);
+                L.i("adjustMs set over adb: " + controller.adjustMs);
             }
         });
     }
@@ -629,7 +655,7 @@ public final class RadioPatch {
         long now = SystemClock.elapsedRealtime();
         if (now < nextAcousticLogAtMs) return;
         nextAcousticLogAtMs = now + 20_000L;
-        Log.i(TAG, reason);
+        L.i(reason);
     }
 
     private void maybeRunAcousticEstimate() {
@@ -649,7 +675,7 @@ public final class RadioPatch {
             try {
                 estimate = AcousticCorrelator.estimate(AudioTap.F1_AUDIO, RadioEngine.RADIO_AUDIO, notBeforeMs);
             } catch (Throwable t) {
-                Log.w(TAG, "acoustic estimate failed", t);
+                L.w("acoustic estimate failed", t);
             }
             final AcousticCorrelator.Estimate result = estimate;
             MAIN.post(() -> {
@@ -681,7 +707,7 @@ public final class RadioPatch {
         accumulator.add(estimate);
         AcousticCorrelator.Estimate total = accumulator.result();
         if (total == null) return;
-        Log.i(TAG, String.format(Locale.ROOT, "acoustic now lag=%d score=%.3f ratio=%.2f | combined n=%d lag=%d score=%.3f ratio=%.2f",
+        L.i(String.format(Locale.ROOT, "acoustic now lag=%d score=%.3f ratio=%.2f | combined n=%d lag=%d score=%.3f ratio=%.2f",
                 estimate.lagMs, estimate.score, estimate.peakRatio, accumulator.count, total.lagMs, total.score, total.peakRatio));
         long lag = total.lagMs;
         double minRatio = Math.abs(lag) > FAR_LAG_MS ? FAR_MIN_RATIO : (resyncing ? RESYNC_MIN_RATIO : INTEGRATED_MIN_RATIO);
@@ -706,7 +732,7 @@ public final class RadioPatch {
         setAdjust(adjustMs - lag);
         lastAcousticApplyAtMs = now;
         lastAcousticCheckAtMs = now;
-        Log.i(TAG, "acoustic correction lagMs=" + lag + " adjustMs=" + adjustMs + " (combined of " + accumulator.count + ")");
+        L.i("acoustic correction lagMs=" + lag + " adjustMs=" + adjustMs + " (combined of " + accumulator.count + ")");
         if (Math.abs(lag) >= 500L) ui.notify(RadioUi.Notice.ACOUSTIC_ADJUSTED, -lag);
     }
 }

@@ -1044,6 +1044,28 @@ for smali in root.glob('smali*/com/tiledmedia/**/*.smali'):
 if hooked_writes == 0:
     warn("no ClearVR AudioTrack.write call found; acoustic sync unavailable")
 
+# ── Hook 3b (diagnostic builds, F1TV_CRYPTO_PROBE=1): log how ClearVR hands protected samples to the
+# decoder (sample layout, IV, pattern, flags), to compare with another player on the same TV.
+# The call itself is passed on unchanged.
+if os.environ.get('F1TV_CRYPTO_PROBE', '0') == '1':
+    probed = 0
+    QUEUE_RE = re.compile(r'invoke-virtual(/range)? (\{[^}]+\}), Landroid/media/MediaCodec;->queueSecureInputBuffer'
+                          r'\(IILandroid/media/MediaCodec\$CryptoInfo;JI\)V')
+    for smali in root.glob('smali*/com/tiledmedia/**/*.smali'):
+        text = smali.read_text()
+        if 'queueSecureInputBuffer' not in text:
+            continue
+        new_text, n = QUEUE_RE.subn(
+            lambda m: 'invoke-static' + (m.group(1) or '') + ' ' + m.group(2) + ', Lcom/f1tvpatch/radio/CryptoProbe;->'
+                      'queueSecureInputBuffer(Landroid/media/MediaCodec;IILandroid/media/MediaCodec$CryptoInfo;JI)V',
+            text)
+        if n:
+            smali.write_text(new_text)
+            probed += n
+            print(f"  Probing queueSecureInputBuffer in {smali.relative_to(root)} ({n})")
+    if probed == 0:
+        warn("F1TV_CRYPTO_PROBE=1 but no queueSecureInputBuffer call found")
+
 # (Settings: no hook. The extension adds a "Grand Prix Radio" button to F1TV's settings page by
 #  watching the layout for its button ids at runtime; see TvSettingsEntry.java.)
 
