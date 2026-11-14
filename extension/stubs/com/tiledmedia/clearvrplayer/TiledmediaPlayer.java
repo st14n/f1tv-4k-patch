@@ -4,4 +4,5 @@ package com.tiledmedia.clearvrplayer;
 public class TiledmediaPlayer {
     public boolean muteAudio(boolean mute) { throw new UnsupportedOperationException(); }
     public boolean getIsAudioMuted() { throw new UnsupportedOperationException(); }
+    public boolean isPlaying() { throw new UnsupportedOperationException(); }
 }

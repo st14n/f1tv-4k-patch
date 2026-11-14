@@ -257,24 +257,31 @@ public final class RadioPatch {
     }
 
     private boolean startMuteChecked;
+    private long playingSinceMs;
 
     /**
-     * Once per player: F1's audio must not start muted. If ClearVR reports muted although this patch
-     * did not mute it (a mute left over from an earlier session; the mute state lives in ClearVR's
-     * core), say so in the log and unmute, so a replay is not silent. The viewer's own mute button
-     * still works afterwards.
+     * Once per player, two seconds into playback (ClearVR only reports its mute state once playout
+     * runs): F1's audio must not be muted unless the viewer did it. ClearVR's core keeps a mute
+     * across sessions (it can be left over from an earlier session, e.g. one that ended while the
+     * radio had F1 muted), and F1TV itself never unmutes at start, so a replay stays silent. Logged.
      */
     private void checkStartMute(HostPlayer player) {
         if (startMuteChecked || f1MutedByUs) return;
         try {
             TiledmediaPlayer clearVr = player.clearVrPlayer();
-            if (clearVr == null) return;
+            if (clearVr == null || !clearVr.isPlaying()) {
+                playingSinceMs = 0L;
+                return;
+            }
+            long now = SystemClock.elapsedRealtime();
+            if (playingSinceMs == 0L) playingSinceMs = now;
+            if (now - playingSinceMs < 2_000L) return;
             startMuteChecked = true;
             boolean muted = clearVr.getIsAudioMuted();
-            L.i("ClearVR audio at start: muted=" + muted + " (patch has not muted it)");
+            L.i("ClearVR audio after start: muted=" + muted + " (the patch has not muted it)");
             if (muted) {
                 clearVr.muteAudio(false);
-                L.i("ClearVR audio was muted at start: unmuted; now muted=" + clearVr.getIsAudioMuted());
+                L.i("ClearVR audio was muted without the patch: unmuted; now muted=" + clearVr.getIsAudioMuted());
             }
         } catch (Throwable t) {
             startMuteChecked = true;
