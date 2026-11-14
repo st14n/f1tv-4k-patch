@@ -40,6 +40,8 @@ public final class RadioPatch {
     private static final String PREFS = "f1tv_radio_patch";
     private static final String KEY_ENABLED = "enabled";
     private static final String KEY_ADJUST_MS = "adjust_ms";
+    /** The adjustment the viewer last set or confirmed by hand ("that's right"): the acoustic sync stays near it. */
+    private static final String KEY_ANCHOR_MS = "adjust_anchor_ms";
     private static final String KEY_ACOUSTIC = "acoustic_sync2";
     private static final String KEY_FX_SYNC = "fx_sync";
     private static final String KEY_AUTO_SYNC = "auto_sync";
@@ -55,29 +57,17 @@ public final class RadioPatch {
     private static final long MAX_DELAY_MS = 145_000L;
     private static final int MAX_CONSECUTIVE_FAILURES = 50;
     private static final long ACOUSTIC_INTERVAL_MS = 5_000L;
-    // Correlation strength / peak-vs-runner-up needed before trusting an acoustic estimate.
-    // Real matches on live sessions score 0.27-0.52 with a peak ratio of 2-7; chance matches on
-    // commentary-only stretches reached 0.13 / 1.34 and, at the 10 s search edge, moved the radio 10 s
-    // off (2026-10-24 quali). Thresholds of 0.25 / 2.0 on top of that never let it correct at all
-    // (2026-11-01 race). So: a moderate bar, no edge lags, two independent agreeing estimates, and a
-    // clearly strong estimate is applied on its own. Logged so these can be tuned further.
-    private static final double ACOUSTIC_MIN_SCORE = 0.15;
-    private static final double ACOUSTIC_MIN_PEAK_RATIO = 1.4;
-    private static final double ACOUSTIC_STRONG_SCORE = 0.30;
-    private static final double ACOUSTIC_STRONG_PEAK_RATIO = 2.5;
-    // Lags this close to the search limit are mostly edge artefacts
-    private static final long ACOUSTIC_EDGE_MARGIN_MS = 1_500L;
-    // Two estimates must agree this closely before the adjustment is changed...
-    private static final long ACOUSTIC_AGREEMENT_MS = 250L;
-    private static final long ACOUSTIC_PENDING_MAX_MS = 90_000L;
-    // ...and come from different audio: estimates run every 5 s over a 30 s window, so neighbours
-    // share most of their input and agree by construction. Require a full window between them.
-    private static final long ACOUSTIC_INDEPENDENT_MS = AcousticCorrelator.WINDOW_MS;
     // Smaller offsets are within what the measurement itself can resolve
     private static final long ACOUSTIC_DEADBAND_MS = 150L;
     // After a delay change the playout converges over ~3 s; only measure audio from after that
     private static final long ALIGNMENT_SETTLE_MS = 4_000L;
     private static final long TARGET_JUMP_MS = 500L;
+    // The adjustment is minus the station's own latency (studio, encoder, server): seconds. Without a
+    // value the viewer set by hand, the acoustic sync keeps it inside this range (and a stored value
+    // outside it is discarded); with one, it stays within ANCHOR_RANGE_MS of that.
+    private static final long ADJUST_PLAUSIBLE_MIN_MS = -20_000L;
+    private static final long ADJUST_PLAUSIBLE_MAX_MS = 5_000L;
+    private static final long ANCHOR_RANGE_MS = 8_000L;
     private static final ExecutorService ACOUSTIC_EXECUTOR = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "radio-acoustic-sync");
         thread.setDaemon(true);
@@ -148,6 +138,13 @@ public final class RadioPatch {
         enabled = prefs.getBoolean(KEY_ENABLED, Config.DEFAULT_ENABLED);
         autoSync = true; // the radio always follows the picture; the switch only turns it off for this session
         adjustMs = prefs.getLong(KEY_ADJUST_MS, Config.DEFAULT_ADJUST_MS);
+        if (!prefs.contains(KEY_ANCHOR_MS) && (adjustMs < ADJUST_PLAUSIBLE_MIN_MS || adjustMs > ADJUST_PLAUSIBLE_MAX_MS)) {
+            // E.g. -28 s after the 8 November build, whose audio tap could stamp the F1 audio seconds
+            // off and so "corrected" the radio the wrong way, more than once
+            L.w("stored adjustMs=" + adjustMs + " is not a plausible radio latency; back to " + Config.DEFAULT_ADJUST_MS);
+            adjustMs = Config.DEFAULT_ADJUST_MS;
+            prefs.edit().putLong(KEY_ADJUST_MS, adjustMs).apply();
+        }
         manualDelayMs = prefs.getLong(KEY_MANUAL_DELAY_MS, Config.FALLBACK_DELAY_MS);
         acoustic = prefs.getBoolean(KEY_ACOUSTIC, true);
         fxSync = prefs.getBoolean(KEY_FX_SYNC, true);
@@ -486,6 +483,7 @@ public final class RadioPatch {
         }
         if (autoSync) {
             setAdjust(adjustMs + deltaMs);
+            prefs.edit().putLong(KEY_ANCHOR_MS, adjustMs).apply();
         } else {
             manualDelayMs = clampDelay(manualDelayMs + deltaMs);
             prefs.edit().putLong(KEY_MANUAL_DELAY_MS, manualDelayMs).apply();
@@ -543,7 +541,7 @@ public final class RadioPatch {
         pendingEstimate = null;
         resyncUntilMs = 0L;
         resyncNoticePending = false;
-        prefs.edit().putLong(KEY_ADJUST_MS, adjustMs).apply();
+        prefs.edit().putLong(KEY_ADJUST_MS, adjustMs).putLong(KEY_ANCHOR_MS, adjustMs).apply();
         L.i("sync locked adjustMs=" + adjustMs);
         ui.notify(RadioUi.Notice.LOCKED, adjustMs);
     }
@@ -603,9 +601,9 @@ public final class RadioPatch {
 
     /** How the acoustic measurement is doing, for the panel: collected curves and the combined result. */
     String getAcousticProgressText() {
-        AcousticCorrelator.Estimate total = accumulator.result();
-        if (total == null) return "";
-        return String.format(Locale.ROOT, "%d/%d", Math.min(accumulator.count, INTEGRATED_MIN_COUNT), INTEGRATED_MIN_COUNT);
+        int count = decider.count();
+        if (count == 0) return "";
+        return String.format(Locale.ROOT, "%d/%d", Math.min(count, AcousticDecider.MIN_COUNT), AcousticDecider.MIN_COUNT);
     }
 
     /** Every 10 s while live: what the sync is based on, for tuning from the logs. */
@@ -618,7 +616,7 @@ public final class RadioPatch {
                 + " radioCarrying=" + radioCarrying + " f1Muted=" + f1MutedByUs + " state=" + getSyncState()
                 + " acoustic=" + acoustic + " suspended=" + acousticSuspended + " tapWrites=" + AudioTap.writes
                 + " tapMute=" + mutedViaTap + String.format(Locale.ROOT, " f1Level=%.4f", AudioTap.level)
-                + " fx=" + fxAudio.isActive() + " curves=" + accumulator.count);
+                + " fx=" + fxAudio.isActive() + " curves=" + decider.count());
     }
 
     /** From adb (LoginReceiver, DUMP-protected): set the sync adjustment of the running session. */
@@ -679,7 +677,7 @@ public final class RadioPatch {
     private void markAlignmentChanged() {
         lastAlignmentChangeAtMs = SystemClock.elapsedRealtime() + ALIGNMENT_SETTLE_MS;
         pendingEstimate = null;
-        accumulator.reset();
+        decider.reset();
     }
 
     private long nextAcousticLogAtMs;
@@ -705,53 +703,43 @@ public final class RadioPatch {
         final double notBeforeMs = lastAlignmentChangeAtMs;
         acousticInFlight = true;
         ACOUSTIC_EXECUTOR.execute(() -> {
-            AcousticCorrelator.Estimate estimate = null;
+            AcousticCorrelator.Estimate sideEstimate = null;
+            AcousticCorrelator.Estimate monoEstimate = null;
             try {
-                estimate = AcousticCorrelator.estimate(AudioTap.F1_AUDIO, RadioEngine.RADIO_AUDIO, notBeforeMs);
+                // Left minus right (commentary cancelled) and the mono mix, each against its radio twin
+                sideEstimate = AcousticCorrelator.estimate(AudioTap.F1_SIDE, RadioEngine.RADIO_SIDE, notBeforeMs);
+                monoEstimate = AcousticCorrelator.estimate(AudioTap.F1_AUDIO, RadioEngine.RADIO_AUDIO, notBeforeMs);
             } catch (Throwable t) {
                 L.w("acoustic estimate failed", t);
             }
-            final AcousticCorrelator.Estimate result = estimate;
+            final AcousticCorrelator.Estimate sideResult = sideEstimate;
+            final AcousticCorrelator.Estimate monoResult = monoEstimate;
             MAIN.post(() -> {
                 acousticInFlight = false;
-                if (result == null) logAcousticIdle("acoustic idle: " + AcousticCorrelator.lastSkip);
-                if (result != null && current == this) onAcousticEstimate(result, notBeforeMs);
+                if (sideResult == null && monoResult == null) logAcousticIdle("acoustic idle: " + AcousticCorrelator.lastSkip);
+                else if (current == this) onAcousticEstimate(sideResult, monoResult, notBeforeMs);
             });
         });
     }
 
-    private final AcousticCorrelator.Accumulator accumulator = new AcousticCorrelator.Accumulator();
+    private final AcousticDecider decider = new AcousticDecider();
     private long lastAcousticApplyAtMs;
-    // Combined evidence needed before moving the radio: this many curves, a clear peak that stands
-    // out, nowhere near the search edge; far corrections need more. A "sync again" asks for less.
-    private static final int INTEGRATED_MIN_COUNT = 8;
-    private static final int RESYNC_MIN_COUNT = 4;
-    private static final double INTEGRATED_MIN_SCORE = 0.10;
-    private static final double INTEGRATED_MIN_RATIO = 1.6;
-    private static final double RESYNC_MIN_RATIO = 1.4;
-    private static final double FAR_MIN_RATIO = 2.2;
-    private static final long FAR_LAG_MS = 5_000L;
     private static final long MIN_APPLY_INTERVAL_MS = 60_000L;
 
-    private void onAcousticEstimate(AcousticCorrelator.Estimate estimate, double notBeforeMs) {
+    private void onAcousticEstimate(AcousticCorrelator.Estimate sideEstimate, AcousticCorrelator.Estimate monoEstimate,
+                                    double notBeforeMs) {
         // The alignment changed while this was computing: it describes audio that no longer applies
         if (lastAlignmentChangeAtMs != notBeforeMs || acousticSuspended || !autoSync) return;
         long now = SystemClock.elapsedRealtime();
         boolean resyncing = now < resyncUntilMs;
-        accumulator.add(estimate);
-        AcousticCorrelator.Estimate total = accumulator.result();
-        if (total == null) return;
-        L.i(String.format(Locale.ROOT, "acoustic now lag=%d score=%.3f ratio=%.2f | combined n=%d lag=%d score=%.3f ratio=%.2f",
-                estimate.lagMs, estimate.score, estimate.peakRatio, accumulator.count, total.lagMs, total.score, total.peakRatio));
-        long lag = total.lagMs;
-        double minRatio = Math.abs(lag) > FAR_LAG_MS ? FAR_MIN_RATIO : (resyncing ? RESYNC_MIN_RATIO : INTEGRATED_MIN_RATIO);
-        boolean confident = accumulator.count >= (resyncing ? RESYNC_MIN_COUNT : INTEGRATED_MIN_COUNT)
-                && total.score >= INTEGRATED_MIN_SCORE && total.peakRatio >= minRatio
-                && Math.abs(lag) <= AcousticCorrelator.MAX_LAG_MS - ACOUSTIC_EDGE_MARGIN_MS;
-        if (!confident) return;
+        AcousticDecider.Decision decision = decider.add(sideEstimate, monoEstimate, resyncing);
+        L.i("acoustic " + decider.lastSummary);
+        if (decision == null) return;
+        long lag = decision.lagMs;
         if (Math.abs(lag) < ACOUSTIC_DEADBAND_MS) {
-            accumulator.reset();
+            decider.reset();
             lastAcousticCheckAtMs = now;
+            L.i("acoustic check: in sync (" + decision.source + ", lag=" + lag + " ms)");
             if (resyncing) {
                 resyncUntilMs = 0L;
                 resyncNoticePending = false;
@@ -760,13 +748,26 @@ public final class RadioPatch {
             return;
         }
         if (!resyncing && now - lastAcousticApplyAtMs < MIN_APPLY_INTERVAL_MS) return;
+        // Radio heard lag ms after the F1 audio: take that much off its delay
+        long corrected = adjustMs - lag;
+        boolean anchored = prefs.contains(KEY_ANCHOR_MS);
+        long anchor = prefs.getLong(KEY_ANCHOR_MS, 0L);
+        boolean plausible = anchored ? Math.abs(corrected - anchor) <= ANCHOR_RANGE_MS
+                : corrected >= ADJUST_PLAUSIBLE_MIN_MS && corrected <= ADJUST_PLAUSIBLE_MAX_MS;
+        if (!plausible) {
+            L.w("acoustic correction refused: lagMs=" + lag + " would make adjustMs=" + corrected
+                    + (anchored ? " (too far from the hand-set " + anchor + ")" : " (not a plausible radio latency)"));
+            decider.reset();
+            return;
+        }
         resyncUntilMs = 0L;
         resyncNoticePending = false;
-        // Radio heard lag ms after the F1 audio: take that much off its delay
-        setAdjust(adjustMs - lag);
+        int curves = decision.curves;
+        setAdjust(corrected);
         lastAcousticApplyAtMs = now;
         lastAcousticCheckAtMs = now;
-        L.i("acoustic correction lagMs=" + lag + " adjustMs=" + adjustMs + " (combined of " + accumulator.count + ")");
+        L.i(String.format(Locale.ROOT, "acoustic correction lagMs=%d adjustMs=%d (%s, %d curves, score=%.3f ratio=%.2f)",
+                lag, adjustMs, decision.source, curves, decision.score, decision.ratio));
         if (Math.abs(lag) >= 500L) ui.notify(RadioUi.Notice.ACOUSTIC_ADJUSTED, -lag);
     }
 }

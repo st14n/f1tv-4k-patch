@@ -22,6 +22,8 @@ public final class AudioTap {
     private AudioTap() { }
 
     static final AcousticFeatures F1_AUDIO = new AcousticFeatures();
+    /** The same audio, left minus right: the circuit sound without the commentary in the middle. */
+    static final AcousticFeatures F1_SIDE = new AcousticFeatures(true);
     /** Writes seen while the tap was wanted (for the sync status log: 0 = the hook gets no audio). */
     static volatile long writes;
     /** Elapsed-realtime of the last write of any kind: tells whether the hook is alive at all. */
@@ -54,10 +56,14 @@ public final class AudioTap {
                 slice.limit(Math.min(slice.limit(), slice.position() + size));
                 if (track.getAudioFormat() == AudioFormat.ENCODING_PCM_FLOAT) {
                     measureFloat(slice);
-                    F1_AUDIO.addPcmFloat(slice, track.getSampleRate(), track.getChannelCount(), heardAtMs(track));
+                    double heardAt = heardAtMs(track);
+                    F1_AUDIO.addPcmFloat(slice, track.getSampleRate(), track.getChannelCount(), heardAt);
+                    F1_SIDE.addPcmFloat(slice, track.getSampleRate(), track.getChannelCount(), heardAt);
                 } else if (track.getAudioFormat() == AudioFormat.ENCODING_PCM_16BIT) {
                     measure16(slice);
-                    F1_AUDIO.addPcm16(slice, track.getSampleRate(), track.getChannelCount(), heardAtMs(track));
+                    double heardAt = heardAtMs(track);
+                    F1_AUDIO.addPcm16(slice, track.getSampleRate(), track.getChannelCount(), heardAt);
+                    F1_SIDE.addPcm16(slice, track.getSampleRate(), track.getChannelCount(), heardAt);
                 }
             }
         } catch (Throwable ignored) {
@@ -88,7 +94,9 @@ public final class AudioTap {
             if (wanted() && track.getAudioFormat() == AudioFormat.ENCODING_PCM_16BIT) {
                 ByteBuffer slice = ByteBuffer.wrap(data, offset, size).order(ByteOrder.nativeOrder());
                 measure16(slice);
-                F1_AUDIO.addPcm16(slice, track.getSampleRate(), track.getChannelCount(), heardAtMs(track));
+                double heardAt = heardAtMs(track);
+                F1_AUDIO.addPcm16(slice, track.getSampleRate(), track.getChannelCount(), heardAt);
+                F1_SIDE.addPcm16(slice, track.getSampleRate(), track.getChannelCount(), heardAt);
             }
         } catch (Throwable ignored) {
             // Never let the tap break playback
@@ -108,7 +116,9 @@ public final class AudioTap {
             if (wanted()) {
                 short[] copy = new short[size];
                 System.arraycopy(data, offset, copy, 0, size);
-                F1_AUDIO.addPcm16(copy, size, track.getSampleRate(), track.getChannelCount(), heardAtMs(track));
+                double heardAt = heardAtMs(track);
+                F1_AUDIO.addPcm16(copy, size, track.getSampleRate(), track.getChannelCount(), heardAt);
+                F1_SIDE.addPcm16(copy, size, track.getSampleRate(), track.getChannelCount(), heardAt);
             }
         } catch (Throwable ignored) {
             // Never let the tap break playback
@@ -126,7 +136,9 @@ public final class AudioTap {
             seen(track);
             mute = silence;
             if (wanted()) {
-                F1_AUDIO.addPcmFloat(data, offset, size, track.getSampleRate(), track.getChannelCount(), heardAtMs(track));
+                double heardAt = heardAtMs(track);
+                F1_AUDIO.addPcmFloat(data, offset, size, track.getSampleRate(), track.getChannelCount(), heardAt);
+                F1_SIDE.addPcmFloat(data, offset, size, track.getSampleRate(), track.getChannelCount(), heardAt);
             }
         } catch (Throwable ignored) {
             // Never let the tap break playback
