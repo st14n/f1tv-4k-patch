@@ -11,10 +11,20 @@ Screenshots are saved at each step for debugging CI failures.
 
 import argparse
 import sys
+import tempfile
 import time
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
+# Patchright (a Playwright fork without the automation tells) driving the real Chrome in a
+# visible window (xvfb on CI) gets past APKMirror's Cloudflare check from a GitHub runner;
+# stock headless Playwright Chromium gets "Attention Required" there. Stock Playwright stays
+# as a fallback for local runs without patchright.
+try:
+    from patchright.sync_api import sync_playwright, TimeoutError as PwTimeout
+    STEALTH = True
+except ImportError:
+    from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
+    STEALTH = False
 
 BASE = "https://www.apkmirror.com"
 
@@ -115,13 +125,30 @@ def nuke_ads(page):
         pass  # Page may be navigating
 
 
-def wait_for_cloudflare(page, timeout: int = 15):
+def click_turnstile(page):
+    """Click the Turnstile checkbox. It sits in an iframe inside a closed shadow root, which
+    selectors cannot reach, but the frame is still listed in page.frames."""
+    for frame in page.frames:
+        if "challenges.cloudflare.com" in frame.url:
+            try:
+                box = frame.frame_element().bounding_box()
+                if box:
+                    log("  Clicking the Turnstile checkbox")
+                    page.mouse.click(box["x"] + 30, box["y"] + box["height"] / 2)
+                    return
+            except Exception as e:
+                log(f"  Turnstile click failed: {e}")
+
+
+def wait_for_cloudflare(page, timeout: int = 45):
     """Wait for Cloudflare challenge to resolve if present."""
     for i in range(timeout):
         title = page.title().lower()
         if "just a moment" in title or "checking" in title or "cloudflare" in title:
             if i == 0:
                 log("  Cloudflare challenge detected, waiting...")
+            elif i in (6, 20, 35):
+                click_turnstile(page)
             time.sleep(1)
         else:
             return
@@ -157,16 +184,29 @@ def download_apkm(release_url: str, variant_url: str | None, output_dir: str) ->
     output_path.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1920, "height": 1080},
-            accept_downloads=True,
-        )
-        page = context.new_page()
+        if STEALTH:
+            # Real Chrome, own user agent, visible window: anything faked is a tell.
+            log("Browser: patchright + Chrome (headful)")
+            browser = context = p.chromium.launch_persistent_context(
+                user_data_dir=tempfile.mkdtemp(prefix="apkm-chrome-"),
+                channel="chrome",
+                headless=False,
+                no_viewport=True,
+                accept_downloads=True,
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+        else:
+            log("Browser: Playwright Chromium (headless; Cloudflare may block this)")
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1920, "height": 1080},
+                accept_downloads=True,
+            )
+            page = context.new_page()
 
         # Block ad/tracking requests at the network level
         def block_ads(route):
@@ -314,7 +354,9 @@ def download_apkm(release_url: str, variant_url: str | None, output_dir: str) ->
         poll_interval = 1
         elapsed = 0
         while download_event is None and elapsed < timeout_secs:
-            time.sleep(poll_interval)
+            # Not time.sleep: the sync API only dispatches events (the download) while a
+            # Playwright call is running, so a plain sleep sees the event only after the loop.
+            page.wait_for_timeout(poll_interval * 1000)
             elapsed += poll_interval
             if elapsed % 10 == 0:
                 log(f"  Still waiting... ({elapsed}s elapsed)")
