@@ -375,10 +375,17 @@ final class RadioEngine {
         }
     }
 
+    /**
+     * Radio stations are mastered loud (measured: about -11 LUFS), F1's commentary tracks quiet (about
+     * -23 LUFS): at full volume the radio was some 12 dB louder than the F1 audio it replaces. A quarter of
+     * the amplitude (-12 dB) brings it to the same level. The acoustic sync reads the PCM before this.
+     */
+    private static final float RADIO_VOLUME = 0.25f;
+
     private static AudioTrack createTrack(int sampleRate, int channels) {
         int channelMask = channels == 1 ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
         int minBuffer = AudioTrack.getMinBufferSize(sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT);
-        return new AudioTrack.Builder()
+        AudioTrack track = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
@@ -391,6 +398,8 @@ final class RadioEngine {
                 .setBufferSizeInBytes(Math.max(minBuffer * 2, sampleRate * channels * 2 / 10))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build();
+        track.setVolume(RADIO_VOLUME);
+        return track;
     }
 
     /** Elapsed-realtime (ms) at which the next frame written to {@code track} will be heard. */
